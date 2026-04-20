@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import re
+from decimal import Decimal
+
+from ..models import ParseContext, ParsedDocument
+from ..utils import build_validation, clean_lines, to_decimal_flexible
+from .base import BaseProfile
+
+
+DETAIL_RE = re.compile(
+    r"^(?P<tipo>\S*)\s*(?P<poliza>\d+)\s+(?P<endoso>\d+)\s+(?P<recibo>\d+)\s+(?P<orden>\S+)\s+"
+    r"(?P<fecha_pago>\d{2}/\d{2}/\d{2})\s+(?P<remesa>\d+)\s+(?P<asegurado>.+?)\s+"
+    r"(?P<prima_neta>-?[\d,]+\.\d{2})\s+(?P<pct>-?[\d,]+\.\d{2})\s*%\s+"
+    r"(?P<comision>-?[\d,]+\.\d{2})\s+(?P<igv>-?[\d,]+\.\d{2})\s+(?P<cargo>-?[\d,]+\.\d{2})\s+"
+    r"(?P<pago_comision>-?[\d,]+\.\d{2})$"
+)
+
+
+class QualitasLiquidationProfile(BaseProfile):
+    profile_id = "qualitas_liquidation"
+    insurer = "QUALITAS"
+    display_name = "Qualitas Liquidacion"
+    keywords = ("QUALITAS", "FOLIO:", "LIQUIDACION DE COMISIONES", "SALDO ACTUAL NETO")
+    priority = 70
+
+    def parse(self, text: str, context: ParseContext) -> ParsedDocument:
+        lines = clean_lines(text)
+        detail_rows, warnings = self._extract_detail_rows(lines)
+        reported_totals = self._extract_totals(lines)
+        validations = self._build_validations(detail_rows, reported_totals)
+        folio_match = re.search(r"FOLIO:\s*([0-9]+)", text, flags=re.IGNORECASE)
+        period_match = re.search(r"PERIODO\s+DEL\s+(.+?)\n", text, flags=re.IGNORECASE)
+
+        return ParsedDocument(
+            source_file=context.file_path.name,
+            source_stem=context.file_path.stem,
+            detected_insurer=self.insurer,
+            detected_profile=self.display_name,
+            document_number=folio_match.group(1) if folio_match else context.file_path.stem,
+            document_type="Liquidacion de Comisiones",
+            broker="LA PROTECTORA CORREDORES DE SEGUROS S.A.",
+            currency="DLS",
+            generated_at=None,
+            input_mode=context.input_mode,
+            extracted_char_count=context.extracted_char_count,
+            page_count=context.page_count,
+            metadata={"periodo": period_match.group(1).strip() if period_match else "N/D"},
+            detail_rows=detail_rows,
+            reported_totals=reported_totals,
+            validations=validations,
+            warnings=warnings,
+        )
+
+    def _extract_detail_rows(self, lines: list[str]) -> tuple[list[dict], list[str]]:
+        rows: list[dict] = []
+        warnings: list[str] = []
+        buffer = ""
+        for line in lines:
+            if self._skip_line(line):
+                continue
+            candidate = f"{buffer} {line}".strip() if buffer else line
+            match = DETAIL_RE.match(candidate)
+            if not match:
+                if re.match(r"^(AUTO|\d{10})", line):
+                    if buffer:
+                        warnings.append(f"Fila QUALITAS no parseada: {buffer}")
+                    buffer = line
+                elif buffer:
+                    buffer = candidate
+                continue
+            payload = match.groupdict()
+            rows.append(
+                {
+                    "tipo": payload["tipo"],
+                    "poliza": payload["poliza"],
+                    "endoso": payload["endoso"],
+                    "recibo": payload["recibo"],
+                    "orden_pago": payload["orden"],
+                    "fecha_pago": payload["fecha_pago"],
+                    "remesa": payload["remesa"],
+                    "asegurado_concepto": payload["asegurado"],
+                    "prima_neta": to_decimal_flexible(payload["prima_neta"]),
+                    "pct_comision": to_decimal_flexible(payload["pct"]),
+                    "comision": to_decimal_flexible(payload["comision"]),
+                    "igv": to_decimal_flexible(payload["igv"]),
+                    "cargo": to_decimal_flexible(payload["cargo"]),
+                    "pago_comision": to_decimal_flexible(payload["pago_comision"]),
+                    "raw_line": candidate,
+                }
+            )
+            buffer = ""
+        if buffer:
+            warnings.append(f"Fila QUALITAS no parseada: {buffer}")
+        return rows, warnings
+
+    def _skip_line(self, line: str) -> bool:
+        upper = line.upper()
+        return any(
+            token in upper
+            for token in (
+                "NOMBRE Y DOMICILIO",
+                "PERIODO DEL",
+                "CODIGO SBS",
+                "OFICINA",
+                "TIPO POLIZA",
+                "COMISION TOTAL PERIODO",
+                "CUALQUIER ACLARACION",
+                "RESUMEN",
+            )
+        )
+
+    def _extract_totals(self, lines: list[str]) -> list[dict]:
+        metric_map = {
+            "IMPORTE": "saldo_actual_neto",
+            "TOTAL": "comision_total_periodo",
+            "SALDO ANTERIOR": "saldo_anterior",
+            "COMISION TOTAL PERIODO": "comision_total_periodo_resumen",
+            "OTROS CARGOS": "otros_cargos",
+            "OTROS ABONOS": "otros_abonos",
+            "PAGO COMISIONES PERIODO ANTERIOR": "pago_comisiones_periodo_anterior",
+            "SALDO ACTUAL TOTAL": "saldo_actual_total",
+            "PAGO DETRACCIONES PERIODO ANTERIOR": "pago_detracciones_periodo_anterior",
+            "SALDO ACTUAL NETO": "saldo_actual_neto_resumen",
+            "I.G.V.": "igv",
+        }
+        totals: list[dict] = []
+        for line in lines:
+            for label, metric in metric_map.items():
+                match = re.match(rf"^{re.escape(label)}\s*:?\s*(-?[\d,]+\.\d{{2}})$", line, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                totals.append({"scope": "DOCUMENTO", "metric": metric, "value": to_decimal_flexible(match.group(1))})
+        return totals
+
+    def _build_validations(self, detail_rows: list[dict], reported_totals: list[dict]) -> list[dict]:
+        validations: list[dict] = []
+        reported_lookup = {row["metric"]: row["value"] for row in reported_totals}
+        calculated = sum((row["pago_comision"] for row in detail_rows), start=Decimal("0"))
+        expected = reported_lookup.get("comision_total_periodo_resumen") or reported_lookup.get("saldo_actual_total")
+        if expected is not None:
+            validations.append(
+                build_validation(
+                    scope="DOCUMENTO",
+                    metric="comision_total_periodo",
+                    expected=expected,
+                    calculated=calculated,
+                )
+            )
+        return validations
