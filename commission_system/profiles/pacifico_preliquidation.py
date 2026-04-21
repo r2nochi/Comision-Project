@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, find_next_numeric_line, find_prefixed_value, next_non_empty_line, to_decimal_flexible
+from ..utils import build_validation, clean_lines, find_prefixed_value, normalize_for_match, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -14,6 +14,15 @@ DETAIL_RE = re.compile(
     r"(?P<prima_comercial>-?[\d,]+\.\d{2})\s+(?P<derecho_emision>-?[\d,]+\.\d{2})\s+"
     r"(?P<prima_afecta>-?[\d,]+\.\d{2})\s+(?P<pct_comision>-?[\d,]+\.\d{2})\s+"
     r"(?P<monto_comision>-?[\d,]+\.\d{2})$"
+)
+
+DETAIL_START_RE = re.compile(r"^\d{1,3}\s+[A-Z0-9]{3,6}\s+\d{6,}\b")
+
+TOTAL_LABELS = (
+    ("SALDO ANTERIOR", "saldo_anterior"),
+    ("MONTO IMPONIBLE", "monto_imponible"),
+    ("IMPUESTO GENERAL A LAS VENTAS", "igv"),
+    ("NETO A PAGAR", "neto_a_pagar"),
 )
 
 
@@ -32,6 +41,8 @@ class PacificoPreliquidationProfile(BaseProfile):
         generated_at = self._extract_generated_at(text)
         detail_rows, warnings = self._extract_detail_rows(lines)
         reported_totals = self._extract_totals(lines)
+        reported_totals, reconciliation_warnings = self._reconcile_totals(detail_rows, reported_totals)
+        warnings.extend(reconciliation_warnings)
         validations = self._build_validations(detail_rows, reported_totals)
 
         return ParsedDocument(
@@ -72,28 +83,27 @@ class PacificoPreliquidationProfile(BaseProfile):
         for line in lines:
             if self._skip_line(line):
                 continue
-            if any(label in line.upper() for label in ("SALDO ANTERIOR", "MONTO IMPONIBLE", "IMPUESTO GENERAL", "NETO A PAGAR")):
+            if self._is_total_line(line):
+                rows, warnings = self._flush_buffer(rows, warnings, buffer)
                 buffer = ""
                 continue
-            candidate = f"{buffer} {line}".strip() if buffer else line
-            parsed = self._parse_detail_line(candidate)
-            if parsed is None:
-                if re.match(r"^\d+\s+\S+", line):
-                    if buffer:
-                        warnings.append(f"Fila PACIFICO no parseada: {buffer}")
-                    buffer = line
-                elif buffer:
-                    buffer = f"{buffer} {line}".strip()
+            if self._looks_like_detail_start(line):
+                rows, warnings = self._flush_buffer(rows, warnings, buffer)
+                buffer = line
                 continue
-            rows.append(parsed)
-            buffer = ""
+            if buffer:
+                if self._parse_detail_line(buffer) is not None:
+                    rows, warnings = self._flush_buffer(rows, warnings, buffer)
+                    buffer = ""
+                    continue
+                buffer = f"{buffer} {line}".strip()
         if buffer:
-            warnings.append(f"Fila PACIFICO no parseada: {buffer}")
+            rows, warnings = self._flush_buffer(rows, warnings, buffer)
         return rows, warnings
 
     def _skip_line(self, line: str) -> bool:
         upper = line.upper()
-        return any(
+        return bool(re.match(r"^\d+\s+DE\s+\d+$", upper)) or upper == "ADMSGCOM" or any(
             token in upper
             for token in (
                 "PRELIQUIDACION DE COMISIONES",
@@ -112,8 +122,26 @@ class PacificoPreliquidationProfile(BaseProfile):
             )
         )
 
+    def _is_total_line(self, line: str) -> bool:
+        upper = normalize_for_match(line)
+        return any(upper.startswith(label) for label, _ in TOTAL_LABELS)
+
+    def _looks_like_detail_start(self, line: str) -> bool:
+        return bool(DETAIL_START_RE.match(line))
+
+    def _flush_buffer(self, rows: list[dict], warnings: list[str], buffer: str) -> tuple[list[dict], list[str]]:
+        if not buffer:
+            return rows, warnings
+        parsed = self._parse_detail_line(buffer)
+        if parsed is None:
+            warnings.append(f"Fila PACIFICO no parseada: {buffer}")
+        else:
+            rows.append(parsed)
+        return rows, warnings
+
     def _parse_detail_line(self, line: str) -> dict | None:
-        normalized = line.replace("  ", " ").replace("111", "1/1").replace("Il", "1/1")
+        normalized = re.sub(r"\s+", " ", line).strip()
+        normalized = normalized.replace("—", " ").replace("–", " ").replace(" ?", " ").replace("? ", " ")
         match = DETAIL_RE.match(normalized)
         if not match:
             return None
@@ -124,7 +152,7 @@ class PacificoPreliquidationProfile(BaseProfile):
             "poliza": payload["poliza"],
             "avcob": payload["avcob"].replace("I", "1").replace("l", "1"),
             "ram": payload["ram"],
-            "document": payload["doc"].replace("I", "1").replace("l", "1"),
+            "document": self._normalize_doc_token(payload["doc"]),
             "concepto": payload["concepto"].strip(),
             "fecha_pago": payload["fecha_pago"],
             "prima_comercial": to_decimal_flexible(payload["prima_comercial"]),
@@ -136,31 +164,91 @@ class PacificoPreliquidationProfile(BaseProfile):
         }
 
     def _extract_totals(self, lines: list[str]) -> list[dict]:
-        totals: list[dict] = []
-        labels = {
-            "SALDO ANTERIOR": "saldo_anterior",
-            "MONTO IMPONIBLE": "monto_imponible",
-            "IMPUESTO GENERAL A LAS VENTAS": "igv",
-            "NETO A PAGAR": "neto_a_pagar",
-        }
-        for index, line in enumerate(lines):
-            upper = line.upper().rstrip(":")
-            if upper not in labels:
+        totals_map: dict[str, Decimal] = {}
+        pending_metrics: list[str] = []
+        capture_numeric_block = False
+
+        for line in lines:
+            normalized = normalize_for_match(line).rstrip(":")
+            metric = next((value for label, value in TOTAL_LABELS if normalized.startswith(label)), None)
+            if metric:
+                capture_numeric_block = True
+                amounts = re.findall(r"-?\d[\d,]*\.\d{2}", line)
+                if amounts:
+                    totals_map[metric] = to_decimal_flexible(amounts[-1])
+                else:
+                    pending_metrics.append(metric)
                 continue
-            value_line = find_next_numeric_line(lines, index)
-            if not value_line:
+
+            if not capture_numeric_block or not pending_metrics:
                 continue
-            number_match = re.search(r"-?[\d,]+\.\d{2}", value_line)
-            if not number_match:
+
+            stripped = line.strip()
+            if not re.fullmatch(r"-?\d[\d,]*\.\d{2}", stripped):
                 continue
-            totals.append(
-                {
-                    "scope": "DOCUMENTO",
-                    "metric": labels[upper],
-                    "value": to_decimal_flexible(number_match.group(0)),
-                }
+
+            metric = pending_metrics.pop(0)
+            totals_map[metric] = to_decimal_flexible(stripped)
+
+        return [
+            {"scope": "DOCUMENTO", "metric": metric, "value": totals_map[metric]}
+            for _, metric in TOTAL_LABELS
+            if metric in totals_map
+        ]
+
+    def _reconcile_totals(self, detail_rows: list[dict], reported_totals: list[dict]) -> tuple[list[dict], list[str]]:
+        warnings: list[str] = []
+        if not detail_rows or not reported_totals:
+            return reported_totals, warnings
+
+        calculated_commission = sum((row["monto_comision"] for row in detail_rows), start=Decimal("0"))
+        totals_lookup = {row["metric"]: row for row in reported_totals}
+        saldo = totals_lookup.get("saldo_anterior", {}).get("value")
+        monto = totals_lookup.get("monto_imponible", {}).get("value")
+        igv = totals_lookup.get("igv", {}).get("value")
+        neto = totals_lookup.get("neto_a_pagar", {}).get("value")
+
+        derived_imponible = None
+        if igv is not None and neto is not None:
+            derived_imponible = neto - igv
+
+        reference = None
+        if saldo is not None and abs(saldo - calculated_commission) <= Decimal("0.01"):
+            reference = saldo
+        elif derived_imponible is not None and abs(derived_imponible - calculated_commission) <= Decimal("0.01"):
+            reference = derived_imponible
+
+        if reference is not None and monto is not None and abs(monto - reference) > Decimal("0.01"):
+            totals_lookup["monto_imponible"]["value"] = reference
+            warnings.append(
+                "Se ajusto monto_imponible usando la consistencia aritmetica del documento y la suma del detalle."
             )
-        return totals
+
+        return reported_totals, warnings
+
+    def _normalize_doc_token(self, value: str) -> str:
+        normalized = value.upper().replace("I", "1").replace("L", "1")
+        normalized = re.sub(r"[^0-9/]", "", normalized)
+        replacements = {
+            "111": "1/1",
+            "1110": "1/10",
+            "1112": "1/12",
+            "011": "0/1",
+            "0/11": "0/1",
+            "1/11": "1/1",
+        }
+        normalized = replacements.get(normalized, normalized)
+        if normalized in {"0/1", "1/1", "1/4", "1/10", "1/12"}:
+            return normalized
+        if normalized.isdigit():
+            normalized = replacements.get(normalized, normalized)
+            if normalized in {"0/1", "1/1", "1/4", "1/10", "1/12"}:
+                return normalized
+        if "/" in normalized:
+            left, right = normalized.split("/", 1)
+            if left in {"0", "1"} and right in {"1", "4", "10", "12"}:
+                return f"{left}/{right}"
+        return normalized
 
     def _build_validations(self, detail_rows: list[dict], reported_totals: list[dict]) -> list[dict]:
         validations: list[dict] = []

@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, find_prefixed_value, to_decimal_flexible
+from ..utils import build_validation, clean_lines, find_prefixed_value, normalize_for_match, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -82,29 +82,56 @@ class AvlaLiquidationProfile(BaseProfile):
 
     def _extract_totals(self, lines: list[str]) -> list[dict]:
         labels = {
-            "COMISIN DEL PERODO": "total_comision",
+            "COMISION DEL PERIODO": "total_comision",
             "I.G.V. (18%)": "igv",
+            "T.G.V. (18%)": "igv",
             "TOTAL A PAGAR": "total_a_pagar",
         }
         totals: list[dict] = []
-        for index, line in enumerate(lines):
-            upper = line.upper()
-            if upper not in labels:
+        pending_labels: list[str] = []
+
+        for line in lines:
+            normalized = normalize_for_match(line)
+            metric = next((value for label, value in labels.items() if normalized.startswith(label)), None)
+            if not metric:
                 continue
-            if index + 1 >= len(lines):
+
+            inline_numbers = self._extract_amounts(line)
+            if inline_numbers:
+                totals.append({"scope": "DOCUMENTO", "metric": metric, "value": to_decimal_flexible(inline_numbers[0])})
                 continue
-            amount_line = lines[index + 1]
-            match = re.search(r"[\d.,]+", amount_line)
-            if not match:
-                continue
-            totals.append(
-                {
-                    "scope": "DOCUMENTO",
-                    "metric": labels[upper],
-                    "value": to_decimal_flexible(match.group(0)),
-                }
-            )
+
+            pending_labels.append(metric)
+
+        if pending_labels:
+            numeric_values: list[Decimal] = []
+            capture = False
+            for line in lines:
+                normalized = normalize_for_match(line)
+                if "RESUMEN DE PAGO" in normalized:
+                    capture = True
+                    continue
+                if not capture:
+                    continue
+                if normalized.startswith("NOTA "):
+                    break
+                if any(normalized.startswith(label) for label in labels):
+                    continue
+                numbers = self._extract_amounts(line)
+                if not numbers:
+                    continue
+                numeric_values.append(to_decimal_flexible(numbers[0]))
+                if len(numeric_values) >= len(pending_labels):
+                    break
+
+            for metric, amount in zip(pending_labels, numeric_values):
+                totals.append({"scope": "DOCUMENTO", "metric": metric, "value": amount})
+
         return totals
+
+    def _extract_amounts(self, line: str) -> list[str]:
+        cleaned = re.sub(r"\(\s*\d+\s*%\s*\)", "", line)
+        return re.findall(r"-?\d[\d.,]*", cleaned)
 
     def _build_validations(self, detail_rows: list[dict], reported_totals: list[dict]) -> list[dict]:
         validations: list[dict] = []

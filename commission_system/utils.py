@@ -60,12 +60,13 @@ def to_decimal_flexible(value: str | None) -> Decimal:
     normalized = str(value).strip()
     if not normalized:
         return Decimal("0")
+    negative = "(" in normalized or bool(re.search(r"-\s*\d", normalized))
     normalized = normalized.upper()
     normalized = normalized.replace("S/", "").replace("US$", "").replace("$", "")
     normalized = normalized.replace("|", "").replace("!", "1").replace("O", "0")
     normalized = normalized.replace(" ", "")
-    normalized = normalized.replace("(", "-").replace(")", "")
-    normalized = normalized.strip(",.-")
+    normalized = normalized.replace("(", "").replace(")", "").replace("-", "")
+    normalized = normalized.strip(",.")
     if not normalized:
         return Decimal("0")
 
@@ -85,6 +86,8 @@ def to_decimal_flexible(value: str | None) -> Decimal:
 
     if normalized in {"-", ".", "-."}:
         return Decimal("0")
+    if negative:
+        normalized = f"-{normalized}"
     return Decimal(normalized)
 
 

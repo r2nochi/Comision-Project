@@ -9,10 +9,10 @@ from .base import BaseProfile
 
 
 DETAIL_RE = re.compile(
-    r"^(?P<cliente>.+?)\s+(?P<poliza>[A-Z0-9-]{2,20})\s+(?P<tipo_doc>NCREDITO|FACTURA)\s+"
-    r"(?P<nro_doc>[A-Z0-9-]+)\s+(?P<fecha_pago>\d{2}/\d{2}/\d{4})\s+(?P<pct>-?[\d.]+)\s+"
-    r"(?P<moneda>\S+)\s+(?P<prima_neta>-?[\d,]+\.\d{2})\s+"
-    r"(?P<comision_total>-?[\d,]+\.\d{2})\s+(?P<comision_pagar>-?[\d,]+\.\d{2})$",
+    r"^(?P<prefix>.+?)\s+(?P<tipo_doc>NCREDITO|FACTURA)\s+(?P<nro_doc>[A-Z0-9-]+)\s+"
+    r"(?P<fecha_pago>\d{2}/\d{2}/\d{4})\s+(?P<pct>-?[\d.]+)\s+(?P<moneda>\S+)\s+"
+    r"(?P<prima_neta>-?[\d,]+\.\d{2})\s+(?P<comision_total>-?[\d,]+\.\d{2})\s+"
+    r"(?P<comision_pagar>-?[\d,]+\.\d{2})$",
     flags=re.IGNORECASE,
 )
 
@@ -62,10 +62,11 @@ class CesceLiquidationProfile(BaseProfile):
             if not match:
                 continue
             payload = match.groupdict()
+            cliente, poliza = self._split_prefix(payload["prefix"])
             rows.append(
                 {
-                    "cliente": payload["cliente"],
-                    "poliza": payload["poliza"],
+                    "cliente": cliente,
+                    "poliza": poliza,
                     "tipo_doc": payload["tipo_doc"],
                     "nro_doc": payload["nro_doc"],
                     "fecha_pago": payload["fecha_pago"],
@@ -80,6 +81,16 @@ class CesceLiquidationProfile(BaseProfile):
         if not rows:
             warnings.append("No se detectaron filas CESCE con OCR suficiente.")
         return rows, warnings
+
+    def _split_prefix(self, prefix: str) -> tuple[str, str]:
+        tokens = prefix.split()
+        if not tokens:
+            return prefix, ""
+        candidate = tokens[-1]
+        if re.fullmatch(r"[A-Z0-9-]{2,20}", candidate, flags=re.IGNORECASE):
+            cliente = " ".join(tokens[:-1]).strip()
+            return (cliente or prefix, candidate)
+        return prefix, ""
 
     def _skip_line(self, line: str) -> bool:
         upper = line.upper()
