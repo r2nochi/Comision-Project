@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from commission_system.excel_exporter import export_results
 from commission_system.pipeline import process_file
@@ -17,6 +19,7 @@ APP_TITLE = "Comision Project"
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "output"
 UPLOAD_DIR = OUTPUT_DIR / "uploads"
+WEB_JOB_DIR = OUTPUT_DIR / "web_jobs"
 
 app = FastAPI(title=APP_TITLE)
 
@@ -43,6 +46,27 @@ def download(filename: str) -> FileResponse:
     )
 
 
+@app.get("/extract-status/{job_id}")
+def extract_status(job_id: str) -> JSONResponse:
+    payload = _read_job_status(job_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return JSONResponse(payload)
+
+
+@app.get("/extract-result/{job_id}", response_class=HTMLResponse)
+def extract_result(job_id: str) -> HTMLResponse:
+    payload = _read_job_status(job_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    state = payload.get("state")
+    if state == "success":
+        return HTMLResponse(_render_result_payload(payload["result"]))
+    if state == "error":
+        return HTMLResponse(_render_failed_result(payload))
+    return HTMLResponse(_render_processing(job_id, payload.get("original_filename", "PDF")))
+
+
 @app.post("/extract", response_class=HTMLResponse)
 async def extract(
     pdf_file: UploadFile = File(...),
@@ -51,22 +75,34 @@ async def extract(
     if not pdf_file.filename or not pdf_file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Debes subir un archivo PDF.")
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     original_stem = sanitize_output_stem(Path(pdf_file.filename).stem)
+    job_id = f"{timestamp}__{original_stem}"
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    WEB_JOB_DIR.mkdir(parents=True, exist_ok=True)
 
     uploaded_pdf = UPLOAD_DIR / f"{timestamp}__{original_stem}.pdf"
     uploaded_pdf.write_bytes(await pdf_file.read())
 
-    started = perf_counter()
-    document = process_file(uploaded_pdf, expected_insurer=expected_insurer)
-    excel_name = f"{timestamp}__{original_stem}__{sanitize_output_stem(document.detected_insurer)}.xlsx"
-    excel_path = OUTPUT_DIR / excel_name
-    export_results([document], excel_path)
-    elapsed_seconds = perf_counter() - started
+    _write_job_status(
+        job_id,
+        {
+            "job_id": job_id,
+            "state": "queued",
+            "original_filename": pdf_file.filename,
+            "expected_insurer": expected_insurer,
+            "uploaded_pdf": str(uploaded_pdf),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    threading.Thread(
+        target=_run_web_job,
+        args=(job_id, uploaded_pdf, expected_insurer, original_stem, timestamp),
+        daemon=True,
+    ).start()
 
-    return HTMLResponse(_render_result(document, excel_name, elapsed_seconds))
+    return HTMLResponse(_render_processing(job_id, pdf_file.filename))
 
 
 def _render_home() -> str:
@@ -373,10 +409,191 @@ def _render_home() -> str:
 </html>"""
 
 
-def _render_result(document, excel_name: str, elapsed_seconds: float) -> str:
-    warning_html = "".join(f"<li>{warning}</li>" for warning in document.warnings) or "<li>Sin observaciones.</li>"
-    marker_html = "".join(f"<span class='chip'>{marker}</span>" for marker in document.detection_markers)
-    elapsed_label = _format_elapsed(elapsed_seconds)
+def _render_processing(job_id: str, original_filename: str) -> str:
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Procesando - {APP_TITLE}</title>
+  <style>
+    :root {{
+      --bg: #f4efe7;
+      --card: #fffaf2;
+      --ink: #1f2a2e;
+      --accent: #0f7f67;
+      --accent-2: #d98f2b;
+      --muted: #6d756f;
+      --border: #d9ccb5;
+      --danger-bg: #fff3ec;
+      --danger-ink: #9a4319;
+      --danger-border: #e9c9b7;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(217, 143, 43, 0.18), transparent 35%),
+        radial-gradient(circle at bottom right, rgba(15, 127, 103, 0.18), transparent 30%),
+        var(--bg);
+      min-height: 100vh;
+    }}
+    .wrap {{
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 36px 20px 48px;
+    }}
+    .card {{
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 28px;
+      box-shadow: 0 18px 40px rgba(43, 39, 34, .10);
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: 32px;
+      line-height: 1.05;
+    }}
+    p {{
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+    .spinner {{
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      border: 4px solid rgba(15, 127, 103, .16);
+      border-top-color: var(--accent);
+      animation: spin 1s linear infinite;
+      margin-bottom: 18px;
+    }}
+    .bar {{
+      margin-top: 20px;
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(15, 127, 103, .10);
+      overflow: hidden;
+      position: relative;
+    }}
+    .bar::after {{
+      content: "";
+      position: absolute;
+      inset: 0;
+      width: 42%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      animation: pulse-slide 1.4s ease-in-out infinite;
+    }}
+    .meta {{
+      margin-top: 18px;
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px dashed var(--border);
+      background: rgba(255,255,255,.55);
+    }}
+    .error {{
+      margin-top: 18px;
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px solid var(--danger-border);
+      background: var(--danger-bg);
+      color: var(--danger-ink);
+      display: none;
+      white-space: pre-wrap;
+    }}
+    .error.active {{
+      display: block;
+    }}
+    .actions {{
+      margin-top: 22px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    a.button {{
+      display: inline-block;
+      background: #d98f2b;
+      color: white;
+      padding: 14px 18px;
+      border-radius: 999px;
+      text-decoration: none;
+      font-weight: 700;
+    }}
+    @keyframes spin {{
+      to {{ transform: rotate(360deg); }}
+    }}
+    @keyframes pulse-slide {{
+      0% {{ transform: translateX(-10%); }}
+      50% {{ transform: translateX(150%); }}
+      100% {{ transform: translateX(-10%); }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <div class="spinner" aria-hidden="true"></div>
+      <h1>Procesando el PDF</h1>
+      <p id="message">
+        Estamos procesando <strong>{original_filename}</strong>. La pagina se actualizara sola cuando el Excel este listo.
+      </p>
+      <div class="bar" aria-hidden="true"></div>
+      <div class="meta">
+        <strong>Job:</strong> <code>{job_id}</code><br />
+        Si el documento necesita OCR, este paso puede tardar bastante. Ya no depende de una sola request larga.
+      </div>
+      <div class="error" id="errorBox"></div>
+      <div class="actions">
+        <a class="button" href="/">Volver</a>
+      </div>
+    </section>
+  </main>
+  <script>
+    (() => {{
+      const jobId = {json.dumps(job_id)};
+      const errorBox = document.getElementById("errorBox");
+      const message = document.getElementById("message");
+
+      const poll = async () => {{
+        try {{
+          const response = await fetch(`/extract-status/${{jobId}}`, {{ cache: "no-store" }});
+          const payload = await response.json();
+          if (!response.ok) {{
+            throw new Error(payload.detail || "No se pudo consultar el estado del job.");
+          }}
+          if (payload.state === "success") {{
+            window.location.href = `/extract-result/${{jobId}}`;
+            return;
+          }}
+          if (payload.state === "error") {{
+            message.textContent = "El procesamiento encontro un error.";
+            errorBox.textContent = payload.error_message || "Ocurrio un error inesperado.";
+            errorBox.classList.add("active");
+            return;
+          }}
+          window.setTimeout(poll, 2500);
+        }} catch (error) {{
+          message.textContent = "Se perdio la conexion mientras consultabamos el estado.";
+          errorBox.textContent = error instanceof Error ? error.message : "Ocurrio un error inesperado.";
+          errorBox.classList.add("active");
+          window.setTimeout(poll, 4000);
+        }}
+      }};
+
+      window.setTimeout(poll, 1200);
+    }})();
+  </script>
+</body>
+</html>"""
+
+
+def _render_result_payload(payload: dict) -> str:
+    warning_html = "".join(f"<li>{warning}</li>" for warning in payload.get("warnings", [])) or "<li>Sin observaciones.</li>"
+    marker_html = "".join(f"<span class='chip'>{marker}</span>" for marker in payload.get("detection_markers", []))
+    elapsed_label = _format_elapsed(payload.get("elapsed_seconds", 0))
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -471,21 +688,82 @@ def _render_result(document, excel_name: str, elapsed_seconds: float) -> str:
       <h1>Excel generado</h1>
       <p>La deteccion se hizo usando el contenido real del PDF. Si tu navegador lo permite, la descarga arrancara desde el boton de abajo.</p>
       <div class="grid">
-        <div class="item"><div class="label">Aseguradora detectada</div><div class="value">{document.detected_insurer}</div></div>
-        <div class="item"><div class="label">Perfil detectado</div><div class="value">{document.detected_profile}</div></div>
-        <div class="item"><div class="label">Modo de entrada</div><div class="value">{document.input_mode}</div></div>
-        <div class="item"><div class="label">Documento</div><div class="value">{document.document_number or "N/D"}</div></div>
-        <div class="item"><div class="label">Filas de detalle</div><div class="value">{len(document.detail_rows)}</div></div>
-        <div class="item"><div class="label">Puntaje deteccion</div><div class="value">{document.detection_score}</div></div>
+        <div class="item"><div class="label">Aseguradora detectada</div><div class="value">{payload["detected_insurer"]}</div></div>
+        <div class="item"><div class="label">Perfil detectado</div><div class="value">{payload["detected_profile"]}</div></div>
+        <div class="item"><div class="label">Modo de entrada</div><div class="value">{payload["input_mode"]}</div></div>
+        <div class="item"><div class="label">Documento</div><div class="value">{payload.get("document_number") or "N/D"}</div></div>
+        <div class="item"><div class="label">Filas de detalle</div><div class="value">{payload["detail_row_count"]}</div></div>
+        <div class="item"><div class="label">Puntaje deteccion</div><div class="value">{payload["detection_score"]}</div></div>
         <div class="item"><div class="label">Tiempo de proceso</div><div class="value">{elapsed_label}</div></div>
       </div>
       <div class="chips">{marker_html}</div>
       <h2>Observaciones</h2>
       <ul>{warning_html}</ul>
       <div class="actions">
-        <a class="button" href="/download/{excel_name}" download>Descargar Excel</a>
+        <a class="button" href="/download/{payload["excel_name"]}" download>Descargar Excel</a>
         <a class="button secondary" href="/">Procesar otro PDF</a>
       </div>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
+def _render_failed_result(payload: dict) -> str:
+    error_message = payload.get("error_message", "Ocurrio un error inesperado.")
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Error - {APP_TITLE}</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: #f6f3ee;
+      color: #1e272a;
+    }}
+    .wrap {{
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }}
+    .card {{
+      background: white;
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 16px 40px rgba(0,0,0,.08);
+      border: 1px solid #e2d8ca;
+    }}
+    .error {{
+      margin-top: 16px;
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px solid #e9c9b7;
+      background: #fff3ec;
+      color: #9a4319;
+      white-space: pre-wrap;
+    }}
+    a.button {{
+      display: inline-block;
+      margin-top: 20px;
+      background: #d98f2b;
+      color: white;
+      padding: 14px 18px;
+      border-radius: 999px;
+      text-decoration: none;
+      font-weight: 700;
+    }}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>No pudimos procesar el PDF</h1>
+      <p>La request larga ya fue desacoplada del procesamiento, pero este job en particular termino con error.</p>
+      <div class="error">{error_message}</div>
+      <a class="button" href="/">Volver</a>
     </section>
   </main>
 </body>
@@ -500,3 +778,92 @@ def _format_elapsed(elapsed_seconds: float) -> str:
     minutes = int(elapsed_seconds // 60)
     seconds = elapsed_seconds - (minutes * 60)
     return f"{minutes} min {seconds:.1f} s"
+
+
+def _run_web_job(
+    job_id: str,
+    uploaded_pdf: Path,
+    expected_insurer: str,
+    original_stem: str,
+    timestamp: str,
+) -> None:
+    _write_job_status(
+        job_id,
+        {
+            "job_id": job_id,
+            "state": "running",
+            "original_filename": uploaded_pdf.name,
+            "expected_insurer": expected_insurer,
+            "uploaded_pdf": str(uploaded_pdf),
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    try:
+        started = perf_counter()
+        document = process_file(uploaded_pdf, expected_insurer=expected_insurer)
+        excel_name = f"{timestamp}__{original_stem}__{sanitize_output_stem(document.detected_insurer)}.xlsx"
+        excel_path = OUTPUT_DIR / excel_name
+        export_results([document], excel_path)
+        elapsed_seconds = perf_counter() - started
+        result_payload = {
+            "detected_insurer": document.detected_insurer,
+            "detected_profile": document.detected_profile,
+            "input_mode": document.input_mode,
+            "document_number": document.document_number,
+            "detail_row_count": len(document.detail_rows),
+            "detection_score": document.detection_score,
+            "detection_markers": document.detection_markers,
+            "warnings": document.warnings,
+            "excel_name": excel_name,
+            "excel_path": str(excel_path),
+            "elapsed_seconds": elapsed_seconds,
+        }
+        _write_job_status(
+            job_id,
+            {
+                "job_id": job_id,
+                "state": "success",
+                "original_filename": uploaded_pdf.name,
+                "expected_insurer": expected_insurer,
+                "uploaded_pdf": str(uploaded_pdf),
+                "result": result_payload,
+                "completed_at": datetime.now().isoformat(timespec="seconds"),
+            },
+        )
+    except Exception as exc:  # pragma: no cover - runtime failure path
+        _write_job_status(
+            job_id,
+            {
+                "job_id": job_id,
+                "state": "error",
+                "original_filename": uploaded_pdf.name,
+                "expected_insurer": expected_insurer,
+                "uploaded_pdf": str(uploaded_pdf),
+                "error_message": str(exc),
+                "completed_at": datetime.now().isoformat(timespec="seconds"),
+            },
+        )
+
+
+def _job_dir(job_id: str) -> Path:
+    path = WEB_JOB_DIR / job_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _job_status_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "status.json"
+
+
+def _write_job_status(job_id: str, payload: dict) -> None:
+    status_path = _job_status_path(job_id)
+    temp_path = status_path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    temp_path.replace(status_path)
+
+
+def _read_job_status(job_id: str) -> dict | None:
+    status_path = _job_status_path(job_id)
+    if not status_path.exists():
+        return None
+    return json.loads(status_path.read_text(encoding="utf-8"))
