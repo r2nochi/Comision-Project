@@ -33,6 +33,14 @@ Procesamiento por lote:
 python .\run_commissions.py --input-dir .\files --output .\output\comisiones_multiaseguradora.xlsx
 ```
 
+Jobs por manifest:
+
+```powershell
+python .\run_jobs.py build-manifests --input-dir .\files --manifests-dir .\output\jobs\manifests --queue-path .\output\jobs\queues\all_pdfs_auto.queue.json --output-root .\output\jobs\results --expected-insurer AUTO --include-scans
+python .\run_jobs.py run-job --manifest .\output\jobs\manifests\001__20101097448_LIQ_COMISION_SECREX_NRO_16792.job.json
+python .\run_jobs.py run-queue --queue .\output\jobs\queues\all_pdfs_auto.queue.json
+```
+
 Web local:
 
 ```powershell
