@@ -11,6 +11,7 @@ from .protecta_lote import ProtectaLoteProfile
 from .qualitas_liquidation import QualitasLiquidationProfile
 from .rimac_preliquidation import RimacPreliquidationProfile
 from .sanitas_eps import SanitasEpsProfile
+from .sanitas_liquidation import SanitasLiquidationProfile
 
 
 PROFILE_REGISTRY = [
@@ -20,6 +21,7 @@ PROFILE_REGISTRY = [
     QualitasLiquidationProfile(),
     AvlaLiquidationProfile(),
     SanitasEpsProfile(),
+    SanitasLiquidationProfile(),
     CrecerLiquidationProfile(),
     ProtectaLiquidationProfile(),
     GenericLiquidationProfile(

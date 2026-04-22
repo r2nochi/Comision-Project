@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from time import perf_counter
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -59,18 +59,21 @@ async def extract(
     uploaded_pdf = UPLOAD_DIR / f"{timestamp}__{original_stem}.pdf"
     uploaded_pdf.write_bytes(await pdf_file.read())
 
+    started = perf_counter()
     document = process_file(uploaded_pdf, expected_insurer=expected_insurer)
     excel_name = f"{timestamp}__{original_stem}__{sanitize_output_stem(document.detected_insurer)}.xlsx"
     excel_path = OUTPUT_DIR / excel_name
     export_results([document], excel_path)
+    elapsed_seconds = perf_counter() - started
 
-    return HTMLResponse(_render_result(document, excel_name))
+    return HTMLResponse(_render_result(document, excel_name, elapsed_seconds))
 
 
 def _render_home() -> str:
     insurer_options = "\n".join(
         f'<option value="{insurer}">{insurer}</option>' for insurer in ["AUTO", *SUPPORTED_INSURERS]
     )
+    tags_html = "".join(f'<span class="tag">{insurer}</span>' for insurer in SUPPORTED_INSURERS)
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -86,6 +89,9 @@ def _render_home() -> str:
       --accent-2: #d98f2b;
       --muted: #6d756f;
       --border: #d9ccb5;
+      --danger-bg: #fff3ec;
+      --danger-ink: #9a4319;
+      --danger-border: #e9c9b7;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -151,6 +157,10 @@ def _render_home() -> str:
       font-weight: 700;
       cursor: pointer;
     }}
+    button[disabled] {{
+      opacity: .8;
+      cursor: wait;
+    }}
     .note {{
       margin-top: 18px;
       padding: 16px;
@@ -172,45 +182,201 @@ def _render_home() -> str:
       font-size: 13px;
       color: var(--muted);
     }}
+    .loading-overlay {{
+      position: fixed;
+      inset: 0;
+      display: none;
+      place-items: center;
+      background: rgba(244, 239, 231, .84);
+      backdrop-filter: blur(4px);
+      z-index: 20;
+      padding: 20px;
+    }}
+    .loading-overlay.active {{
+      display: grid;
+    }}
+    .loading-card {{
+      width: min(100%, 540px);
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 18px 40px rgba(43, 39, 34, .12);
+    }}
+    .loading-head {{
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }}
+    .spinner {{
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      border: 4px solid rgba(15, 127, 103, .16);
+      border-top-color: var(--accent);
+      animation: spin 1s linear infinite;
+      flex: 0 0 auto;
+    }}
+    .loading-title {{
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.1;
+    }}
+    .loading-copy {{
+      margin: 12px 0 0;
+    }}
+    .loading-bar {{
+      margin-top: 18px;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(15, 127, 103, .10);
+      overflow: hidden;
+      position: relative;
+    }}
+    .loading-bar::after {{
+      content: "";
+      position: absolute;
+      inset: 0;
+      width: 42%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      animation: pulse-slide 1.4s ease-in-out infinite;
+    }}
+    .loading-tips {{
+      margin: 16px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.5;
+    }}
+    .loading-error {{
+      margin-top: 16px;
+      padding: 14px;
+      border-radius: 14px;
+      border: 1px solid var(--danger-border);
+      background: var(--danger-bg);
+      color: var(--danger-ink);
+      display: none;
+      white-space: pre-wrap;
+    }}
+    .loading-error.active {{
+      display: block;
+    }}
+    @keyframes spin {{
+      to {{ transform: rotate(360deg); }}
+    }}
+    @keyframes pulse-slide {{
+      0% {{ transform: translateX(-10%); }}
+      50% {{ transform: translateX(150%); }}
+      100% {{ transform: translateX(-10%); }}
+    }}
   </style>
 </head>
 <body>
+  <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
+    <section class="loading-card" aria-live="polite">
+      <div class="loading-head">
+        <div class="spinner" aria-hidden="true"></div>
+        <div>
+          <h2 class="loading-title">Procesando el PDF</h2>
+          <p class="loading-copy" id="loadingMessage">
+            Estamos detectando la aseguradora y preparando el Excel.
+          </p>
+        </div>
+      </div>
+      <div class="loading-bar" aria-hidden="true"></div>
+      <ul class="loading-tips">
+        <li>Si el documento necesita OCR, puede tardar un poco mas.</li>
+        <li>La pagina seguira visible hasta que el resultado este listo.</li>
+      </ul>
+      <div class="loading-error" id="loadingError"></div>
+    </section>
+  </div>
   <main class="wrap">
     <section class="hero">
-      <h1>Extracción de comisiones por contenido real del PDF</h1>
+      <h1>Extraccion de comisiones por contenido real del PDF</h1>
       <p>
-        Sube un PDF y el backend detectará la aseguradora por el texto o logo del documento,
-        aunque el nombre del archivo esté mal. Luego construirá el Excel y lo dejará guardado
-        también en la carpeta <code>output</code>.
+        Sube un PDF y el backend detectara la aseguradora por el texto o logo del documento,
+        aunque el nombre del archivo este mal. Luego construira el Excel y lo dejara guardado
+        tambien en la carpeta <code>output</code>.
       </p>
-      <form action="/extract" method="post" enctype="multipart/form-data">
+      <form action="/extract" method="post" enctype="multipart/form-data" id="extractForm">
         <label>
-          PDF de comisión
-          <input type="file" name="pdf_file" accept=".pdf,application/pdf" required />
+          PDF de comision
+          <input type="file" name="pdf_file" accept=".pdf,application/pdf" required id="pdfInput" />
         </label>
         <label>
           Aseguradora esperada
-          <select name="expected_insurer">
+          <select name="expected_insurer" id="expectedInsurer">
             {insurer_options}
           </select>
         </label>
-        <button type="submit">Procesar y generar Excel</button>
+        <button type="submit" id="submitButton">Procesar y generar Excel</button>
       </form>
       <div class="note">
-        La descarga usa el navegador, así que el archivo irá a la carpeta de descargas predeterminada del dispositivo que abrió la web.
+        La descarga usa el navegador, asi que el archivo ira a la carpeta de descargas predeterminada
+        del dispositivo que abrio la web.
       </div>
-      <div class="tags">
-        {"".join(f'<span class="tag">{insurer}</span>' for insurer in SUPPORTED_INSURERS)}
-      </div>
+      <div class="tags">{tags_html}</div>
     </section>
   </main>
+  <script>
+    (() => {{
+      const form = document.getElementById("extractForm");
+      const overlay = document.getElementById("loadingOverlay");
+      const submitButton = document.getElementById("submitButton");
+      const pdfInput = document.getElementById("pdfInput");
+      const loadingMessage = document.getElementById("loadingMessage");
+      const loadingError = document.getElementById("loadingError");
+
+      if (!form || !overlay || !submitButton || !pdfInput || !loadingMessage || !loadingError) {{
+        return;
+      }}
+
+      form.addEventListener("submit", async (event) => {{
+        event.preventDefault();
+        if (!pdfInput.files || !pdfInput.files.length) {{
+          pdfInput.focus();
+          return;
+        }}
+
+        overlay.classList.add("active");
+        overlay.setAttribute("aria-hidden", "false");
+        loadingError.classList.remove("active");
+        loadingError.textContent = "";
+        loadingMessage.textContent = "Estamos detectando la aseguradora y preparando el Excel.";
+        submitButton.disabled = true;
+        submitButton.textContent = "Procesando...";
+
+        try {{
+          const response = await fetch(form.action, {{
+            method: "POST",
+            body: new FormData(form),
+          }});
+          const html = await response.text();
+          if (!response.ok) {{
+            throw new Error(html || "No pudimos procesar el PDF.");
+          }}
+          document.open();
+          document.write(html);
+          document.close();
+        }} catch (error) {{
+          loadingMessage.textContent = "Tuvimos un problema al procesar el archivo.";
+          loadingError.textContent = error instanceof Error ? error.message : "Ocurrio un error inesperado.";
+          loadingError.classList.add("active");
+          submitButton.disabled = false;
+          submitButton.textContent = "Procesar y generar Excel";
+        }}
+      }});
+    }})();
+  </script>
 </body>
 </html>"""
 
 
-def _render_result(document, excel_name: str) -> str:
+def _render_result(document, excel_name: str, elapsed_seconds: float) -> str:
     warning_html = "".join(f"<li>{warning}</li>" for warning in document.warnings) or "<li>Sin observaciones.</li>"
     marker_html = "".join(f"<span class='chip'>{marker}</span>" for marker in document.detection_markers)
+    elapsed_label = _format_elapsed(elapsed_seconds)
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -236,7 +402,9 @@ def _render_result(document, excel_name: str) -> str:
       box-shadow: 0 16px 40px rgba(0,0,0,.08);
       border: 1px solid #e2d8ca;
     }}
-    h1 {{ margin-top: 0; }}
+    h1 {{
+      margin-top: 0;
+    }}
     .grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -301,14 +469,15 @@ def _render_result(document, excel_name: str) -> str:
   <main class="wrap">
     <section class="card">
       <h1>Excel generado</h1>
-      <p>La detección se hizo usando el contenido real del PDF. Si tu navegador lo permite, la descarga arrancará desde el botón de abajo.</p>
+      <p>La deteccion se hizo usando el contenido real del PDF. Si tu navegador lo permite, la descarga arrancara desde el boton de abajo.</p>
       <div class="grid">
         <div class="item"><div class="label">Aseguradora detectada</div><div class="value">{document.detected_insurer}</div></div>
         <div class="item"><div class="label">Perfil detectado</div><div class="value">{document.detected_profile}</div></div>
         <div class="item"><div class="label">Modo de entrada</div><div class="value">{document.input_mode}</div></div>
         <div class="item"><div class="label">Documento</div><div class="value">{document.document_number or "N/D"}</div></div>
         <div class="item"><div class="label">Filas de detalle</div><div class="value">{len(document.detail_rows)}</div></div>
-        <div class="item"><div class="label">Puntaje detección</div><div class="value">{document.detection_score}</div></div>
+        <div class="item"><div class="label">Puntaje deteccion</div><div class="value">{document.detection_score}</div></div>
+        <div class="item"><div class="label">Tiempo de proceso</div><div class="value">{elapsed_label}</div></div>
       </div>
       <div class="chips">{marker_html}</div>
       <h2>Observaciones</h2>
@@ -321,3 +490,13 @@ def _render_result(document, excel_name: str) -> str:
   </main>
 </body>
 </html>"""
+
+
+def _format_elapsed(elapsed_seconds: float) -> str:
+    if elapsed_seconds < 1:
+        return f"{elapsed_seconds * 1000:.0f} ms"
+    if elapsed_seconds < 60:
+        return f"{elapsed_seconds:.2f} s"
+    minutes = int(elapsed_seconds // 60)
+    seconds = elapsed_seconds - (minutes * 60)
+    return f"{minutes} min {seconds:.1f} s"
