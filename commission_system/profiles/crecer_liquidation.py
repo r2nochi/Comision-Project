@@ -3,8 +3,14 @@ from __future__ import annotations
 import re
 from decimal import Decimal, ROUND_HALF_UP
 
-from ..utils import normalize_spaces, to_decimal_flexible
+from ..models import ParseContext, ParsedDocument
+from ..utils import clean_lines, normalize_spaces, to_decimal_flexible
 from .generic_liquidation import GenericLiquidationProfile
+from .rotatable_liquidation_layout import (
+    _score_candidate,
+    expected_total_from_reported,
+    extract_best_rotatable_layout_rows,
+)
 
 
 DATE_LINE_RE = re.compile(
@@ -27,6 +33,103 @@ class CrecerLiquidationProfile(GenericLiquidationProfile):
             insurer="CRECER",
             display_name="Crecer Liquidacion",
             keywords=("CRECER", "LIQUIDACION NUMERO", "TOTAL A COBRAR"),
+        )
+
+    def parse(self, text: str, context: ParseContext) -> ParsedDocument:
+        lines = clean_lines(text)
+        reported_totals = self._extract_totals(lines)
+        expected_total = expected_total_from_reported(reported_totals)
+        text_rows, text_warnings = self._extract_detail_rows(lines)
+        layout_candidate = extract_best_rotatable_layout_rows(
+            insurer=self.insurer,
+            file_path=context.file_path,
+            expected_total=expected_total,
+        )
+        merged_rows = self._merge_text_and_layout_rows(
+            text_rows=text_rows,
+            layout_rows=layout_candidate.rows,
+        )
+        candidates = [
+            (
+                "text",
+                text_rows,
+                list(text_warnings),
+                _score_candidate(text_rows, text_warnings, expected_total),
+            ),
+            (
+                "layout",
+                layout_candidate.rows,
+                [
+                    *layout_candidate.warnings,
+                    f"Se uso OCR estructurado del layout {self.insurer} con rotacion {layout_candidate.rotation} para reconstruir mejor el detalle.",
+                ]
+                if layout_candidate.rows
+                else list(layout_candidate.warnings),
+                _score_candidate(layout_candidate.rows, layout_candidate.warnings, expected_total),
+            ),
+            (
+                "merged",
+                merged_rows,
+                [
+                    *text_warnings,
+                    *layout_candidate.warnings,
+                    f"Se combino OCR lineal y layout estructurado {self.insurer} para completar filas del PDF rotado."
+                ],
+                _score_candidate(merged_rows, [*text_warnings, *layout_candidate.warnings], expected_total),
+            ),
+        ]
+        _, detail_rows, warnings, _ = max(candidates, key=lambda item: item[3])
+        validations = self._build_validations(detail_rows, reported_totals)
+        document_number = self._extract_document_number(text, context.file_path.stem)
+        generated_at = self._extract_generated_at(text)
+
+        return ParsedDocument(
+            source_file=context.file_path.name,
+            source_stem=context.file_path.stem,
+            detected_insurer=self.insurer,
+            detected_profile=self.display_name,
+            document_number=document_number,
+            document_type="Liquidacion de Comisiones",
+            broker="LA PROTECTORA CORREDORES DE SEGUROS SA",
+            currency="S/",
+            generated_at=generated_at,
+            input_mode=context.input_mode,
+            extracted_char_count=context.extracted_char_count,
+            page_count=context.page_count,
+            detail_rows=detail_rows,
+            reported_totals=reported_totals,
+            validations=validations,
+            warnings=warnings,
+        )
+
+    def _merge_text_and_layout_rows(self, *, text_rows: list[dict], layout_rows: list[dict]) -> list[dict]:
+        if not text_rows:
+            return list(layout_rows)
+        if not layout_rows:
+            return list(text_rows)
+
+        text_by_key = {self._merge_key(row): row for row in text_rows}
+        merged: list[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        for row in layout_rows:
+            key = self._merge_key(row)
+            merged.append(text_by_key.get(key, row))
+            seen.add(key)
+
+        for row in text_rows:
+            key = self._merge_key(row)
+            if key not in seen:
+                merged.append(row)
+                seen.add(key)
+
+        return merged
+
+    def _merge_key(self, row: dict) -> tuple[str, str, str]:
+        return (
+            str(row.get("fecha_inicio", "")),
+            str(row.get("identificacion", "")),
+            str(row.get("monto_documento", "")),
         )
 
     def _extract_detail_rows(self, lines: list[str]) -> tuple[list[dict], list[str]]:
