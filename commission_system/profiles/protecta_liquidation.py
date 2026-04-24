@@ -4,7 +4,7 @@ import re
 from decimal import Decimal, ROUND_HALF_UP
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import clean_lines, normalize_spaces, to_decimal_flexible
+from ..utils import clean_lines, normalize_code_like_field, normalize_spaces, to_decimal_flexible
 from .generic_liquidation import GenericLiquidationProfile
 from .rotatable_liquidation_layout import choose_best_detail_candidate, expected_total_from_reported
 
@@ -265,6 +265,7 @@ class ProtectaLiquidationProfile(GenericLiquidationProfile):
         return (monto_documento * pct_comision / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     def _normalize_doc_token(self, value: str) -> str:
-        normalized = value.upper().replace("O", "0").replace("I", "1").replace("L", "1")
+        normalized = value.upper().replace("I", "1").replace("L", "1")
+        normalized = normalize_code_like_field(normalized, allowed="A-Z0-9/=-")
         normalized = re.sub(r"[^A-Z0-9/=\-]+", "", normalized)
         return normalized.strip("-")

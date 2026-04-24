@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, to_decimal_flexible
+from ..utils import build_validation, clean_lines, normalize_code_like_field, replace_ocr_o_with_zero_in_numeric_segments, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -29,7 +29,7 @@ class QualitasLiquidationProfile(BaseProfile):
         detail_rows, warnings = self._extract_detail_rows(lines)
         reported_totals = self._extract_totals(lines)
         validations = self._build_validations(detail_rows, reported_totals)
-        folio_match = re.search(r"FOLIO:\s*([0-9]+)", text, flags=re.IGNORECASE)
+        folio_match = re.search(r"FOLIO:\s*([0-9O]+)", text, flags=re.IGNORECASE)
         period_match = re.search(r"PERIODO\s+DEL\s+(.+?)\n", text, flags=re.IGNORECASE)
 
         return ParsedDocument(
@@ -37,7 +37,7 @@ class QualitasLiquidationProfile(BaseProfile):
             source_stem=context.file_path.stem,
             detected_insurer=self.insurer,
             detected_profile=self.display_name,
-            document_number=folio_match.group(1) if folio_match else context.file_path.stem,
+            document_number=normalize_code_like_field(folio_match.group(1), allowed="A-Z0-9") if folio_match else context.file_path.stem,
             document_type="Liquidacion de Comisiones",
             broker="LA PROTECTORA CORREDORES DE SEGUROS S.A.",
             currency="DLS",
@@ -59,7 +59,8 @@ class QualitasLiquidationProfile(BaseProfile):
         for line in lines:
             if self._skip_line(line):
                 continue
-            candidate = f"{buffer} {line}".strip() if buffer else line
+            raw_candidate = f"{buffer} {line}".strip() if buffer else line
+            candidate = replace_ocr_o_with_zero_in_numeric_segments(raw_candidate)
             match = DETAIL_RE.match(candidate)
             if not match:
                 if re.match(r"^(AUTO|\d{10})", line):
@@ -73,12 +74,12 @@ class QualitasLiquidationProfile(BaseProfile):
             rows.append(
                 {
                     "tipo": payload["tipo"],
-                    "poliza": payload["poliza"],
-                    "endoso": payload["endoso"],
-                    "recibo": payload["recibo"],
+                    "poliza": normalize_code_like_field(payload["poliza"], allowed="A-Z0-9"),
+                    "endoso": normalize_code_like_field(payload["endoso"], allowed="A-Z0-9"),
+                    "recibo": normalize_code_like_field(payload["recibo"], allowed="A-Z0-9"),
                     "orden_pago": payload["orden"],
                     "fecha_pago": payload["fecha_pago"],
-                    "remesa": payload["remesa"],
+                    "remesa": normalize_code_like_field(payload["remesa"], allowed="A-Z0-9"),
                     "asegurado_concepto": payload["asegurado"],
                     "prima_neta": to_decimal_flexible(payload["prima_neta"]),
                     "pct_comision": to_decimal_flexible(payload["pct"]),

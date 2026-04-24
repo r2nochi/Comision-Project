@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, find_prefixed_value, normalize_for_match, to_decimal_flexible
+from ..utils import build_validation, clean_lines, find_prefixed_value, normalize_code_like_field, normalize_for_match, replace_ocr_o_with_zero_in_numeric_segments, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -141,6 +141,7 @@ class PacificoPreliquidationProfile(BaseProfile):
 
     def _parse_detail_line(self, line: str) -> dict | None:
         normalized = re.sub(r"\s+", " ", line).strip()
+        normalized = replace_ocr_o_with_zero_in_numeric_segments(normalized)
         normalized = normalized.replace("—", " ").replace("–", " ").replace(" ?", " ").replace("? ", " ")
         match = DETAIL_RE.match(normalized)
         if not match:
@@ -149,7 +150,7 @@ class PacificoPreliquidationProfile(BaseProfile):
         return {
             "item": int(payload["item"]),
             "producto": payload["producto"],
-            "poliza": payload["poliza"],
+            "poliza": normalize_code_like_field(payload["poliza"], allowed="A-Z0-9"),
             "avcob": payload["avcob"].replace("I", "1").replace("l", "1"),
             "ram": payload["ram"],
             "document": self._normalize_doc_token(payload["doc"]),
@@ -228,6 +229,7 @@ class PacificoPreliquidationProfile(BaseProfile):
 
     def _normalize_doc_token(self, value: str) -> str:
         normalized = value.upper().replace("I", "1").replace("L", "1")
+        normalized = normalize_code_like_field(normalized, allowed="A-Z0-9/")
         normalized = re.sub(r"[^0-9/]", "", normalized)
         replacements = {
             "111": "1/1",

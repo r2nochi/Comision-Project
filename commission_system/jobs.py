@@ -13,6 +13,7 @@ from .utils import sanitize_output_stem
 
 MANIFEST_VERSION = 1
 QUEUE_VERSION = 1
+BATCH_MANIFEST_VERSION = 1
 
 
 @dataclass(slots=True)
@@ -32,6 +33,69 @@ class QueueManifest:
     queue_version: int
     queue_name: str
     jobs: list[Path]
+
+
+@dataclass(slots=True)
+class BatchManifestDocument:
+    document_id: str
+    job_name: str
+    source_pdf: Path
+
+
+@dataclass(slots=True)
+class BatchManifest:
+    manifest_path: Path
+    manifest_version: int
+    manifest_name: str
+    expected_insurer: str
+    output_root: Path
+    documents: list[BatchManifestDocument]
+
+
+def build_batch_manifest(
+    *,
+    input_dir: str | Path,
+    manifest_path: str | Path,
+    output_root: str | Path,
+    include_scans: bool = True,
+    expected_insurer: str = "AUTO",
+) -> Path:
+    input_root = Path(input_dir).resolve()
+    manifest_file = Path(manifest_path).resolve()
+    output_root_path = Path(output_root).resolve()
+
+    manifest_file.parent.mkdir(parents=True, exist_ok=True)
+    output_root_path.mkdir(parents=True, exist_ok=True)
+
+    pdf_files = sorted(input_root.glob("*.pdf"))
+    if not include_scans:
+        pdf_files = [path for path in pdf_files if not path.stem.lower().endswith("_scan")]
+
+    created_at = _now_iso()
+    documents_payload: list[dict[str, str]] = []
+
+    for index, pdf_path in enumerate(pdf_files, start=1):
+        documents_payload.append(
+            {
+                "document_id": f"{index:03d}__{sanitize_output_stem(pdf_path.stem).lower()}",
+                "job_name": pdf_path.stem,
+                "source_pdf": _to_posix_relative(pdf_path.resolve(), manifest_file.parent),
+            }
+        )
+
+    manifest_name = manifest_file.name.removesuffix(".manifest.json")
+    payload = {
+        "batch_manifest_version": BATCH_MANIFEST_VERSION,
+        "manifest_name": manifest_name,
+        "created_at": created_at,
+        "document_count": len(documents_payload),
+        "expected_insurer": expected_insurer,
+        "output_root": _to_posix_relative(output_root_path, manifest_file.parent),
+        "mode": "AUTO" if expected_insurer.upper() == "AUTO" else expected_insurer.upper(),
+        "documents": documents_payload,
+    }
+    manifest_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest_file
 
 
 def build_job_manifests(
@@ -121,6 +185,27 @@ def load_queue_manifest(queue_path: str | Path) -> QueueManifest:
     )
 
 
+def load_batch_manifest(manifest_path: str | Path) -> BatchManifest:
+    path = Path(manifest_path).resolve()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    documents = [
+        BatchManifestDocument(
+            document_id=str(document["document_id"]),
+            job_name=str(document.get("job_name", document["document_id"])),
+            source_pdf=_resolve_from_manifest(path, str(document["source_pdf"])),
+        )
+        for document in payload.get("documents", [])
+    ]
+    return BatchManifest(
+        manifest_path=path,
+        manifest_version=int(payload["batch_manifest_version"]),
+        manifest_name=str(payload["manifest_name"]),
+        expected_insurer=str(payload.get("expected_insurer", "AUTO")),
+        output_root=_resolve_from_manifest(path, str(payload["output_root"])),
+        documents=documents,
+    )
+
+
 def run_job(
     manifest_path: str | Path,
     *,
@@ -198,6 +283,73 @@ def run_queue(
         "run_at": _now_iso(),
     }
     summary_path = queue_run_dir / "queue_result.json"
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    return summary
+
+
+def run_batch_manifest(
+    manifest_path: str | Path,
+    *,
+    run_root: str | Path | None = None,
+    stop_on_error: bool = False,
+) -> dict:
+    manifest = load_batch_manifest(manifest_path)
+    timestamp = _now_stamp()
+    base_run_root = Path(run_root).resolve() if run_root else manifest.output_root.resolve()
+    manifest_run_dir = base_run_root / f"{timestamp}__{sanitize_output_stem(manifest.manifest_name)}"
+    manifest_run_dir.mkdir(parents=True, exist_ok=True)
+
+    results: list[dict] = []
+    failures: list[dict] = []
+
+    for document_manifest in manifest.documents:
+        try:
+            document = process_file(document_manifest.source_pdf, expected_insurer=manifest.expected_insurer)
+            excel_name = (
+                f"{timestamp}__{sanitize_output_stem(document_manifest.source_pdf.stem)}__"
+                f"{sanitize_output_stem(document.detected_insurer)}.xlsx"
+            )
+            excel_path = export_results([document], manifest_run_dir / excel_name)
+            results.append(
+                {
+                    "document_id": document_manifest.document_id,
+                    "job_name": document_manifest.job_name,
+                    "source_pdf": str(document_manifest.source_pdf),
+                    "expected_insurer": manifest.expected_insurer,
+                    "detected_insurer": document.detected_insurer,
+                    "detected_profile": document.detected_profile,
+                    "input_mode": document.input_mode,
+                    "detail_row_count": len(document.detail_rows),
+                    "validation_count": len(document.validations),
+                    "warning_count": len(document.warnings),
+                    "detection_score": document.detection_score,
+                    "excel_path": str(excel_path.resolve()),
+                }
+            )
+        except Exception as exc:  # pragma: no cover - manifest error path
+            failures.append(
+                {
+                    "document_id": document_manifest.document_id,
+                    "job_name": document_manifest.job_name,
+                    "source_pdf": str(document_manifest.source_pdf),
+                    "error": str(exc),
+                }
+            )
+            if stop_on_error:
+                break
+
+    summary = {
+        "manifest_name": manifest.manifest_name,
+        "manifest_path": str(manifest.manifest_path),
+        "run_dir": str(manifest_run_dir.resolve()),
+        "document_count": len(manifest.documents),
+        "completed_count": len(results),
+        "failed_count": len(failures),
+        "results": results,
+        "failures": failures,
+        "run_at": _now_iso(),
+    }
+    summary_path = manifest_run_dir / "manifest_result.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return summary
 

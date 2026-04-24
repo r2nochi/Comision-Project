@@ -10,7 +10,7 @@ import pytesseract
 from pytesseract import Output
 
 from ..ocr import ensure_tesseract, preprocess_image
-from ..utils import normalize_for_match, normalize_spaces, to_decimal_flexible
+from ..utils import normalize_code_like_field, normalize_for_match, normalize_spaces, to_decimal_flexible
 
 
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -507,12 +507,7 @@ def _normalize_description(value: str) -> str:
 
 
 def _normalize_document_field(value: str) -> str:
-    normalized = normalize_spaces(value).upper()
-    normalized = normalized.replace("â€”", "-").replace("Â»", "-").replace("=", "-")
-    normalized = normalized.replace(" ", "")
-    normalized = re.sub(r"[^A-Z0-9/\-.]+", "", normalized)
-    normalized = normalized.replace("..", ".")
-    return normalized.strip("-")
+    return normalize_code_like_field(value)
 
 
 def _extract_identification(value: str) -> str:

@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, normalize_for_match, to_decimal_flexible
+from ..utils import build_validation, clean_lines, normalize_code_like_field, normalize_for_match, replace_ocr_o_with_zero_in_numeric_segments, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -88,6 +88,7 @@ class SanitasEpsProfile(BaseProfile):
 
     def _parse_buffer(self, buffer: list[str]) -> dict | None:
         candidate = " ".join(buffer)
+        candidate = replace_ocr_o_with_zero_in_numeric_segments(candidate)
         candidate = re.sub(r"EPS-\s+(?=\d)", "EPS-", candidate)
         candidate = re.sub(r"([BF]\d{3}-?)\s+(\d+)", lambda match: f"{match.group(1)}{match.group(2)}", candidate)
         candidate = re.sub(r"(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})", r"\1 - \2", candidate)
@@ -102,8 +103,8 @@ class SanitasEpsProfile(BaseProfile):
             "vigencia": payload["vigencia"],
             "tipo_documento": payload["tipo_documento"],
             "contrato": payload["contrato"],
-            "nro_documento": payload["nro_documento"],
-            "doc_legal": payload["doc_legal"],
+            "nro_documento": normalize_code_like_field(payload["nro_documento"]),
+            "doc_legal": normalize_code_like_field(payload["doc_legal"]),
             "monto_doc": to_decimal_flexible(payload["monto_doc"]),
             "monto_comision": to_decimal_flexible(payload["monto_comision"]),
             "pct_comision": to_decimal_flexible(payload["pct"]),
@@ -114,6 +115,7 @@ class SanitasEpsProfile(BaseProfile):
 
     def _parse_scan_buffer(self, buffer: list[str]) -> dict | None:
         candidate = re.sub(r"\s+", " ", " ".join(buffer)).strip()
+        candidate = replace_ocr_o_with_zero_in_numeric_segments(candidate)
         candidate = re.sub(r"EPS-\s+(?=\d)", "EPS-", candidate)
         candidate = candidate.replace("FO02-", "F002-").replace("FO002-", "F002-").replace("BO02-", "B002-")
 
@@ -141,8 +143,8 @@ class SanitasEpsProfile(BaseProfile):
             "vigencia": f"{payload['vigencia_inicio']} - {tail_payload['vigencia_fin']}",
             "tipo_documento": payload["tipo_documento"],
             "contrato": payload["contrato"],
-            "nro_documento": f"EPS-{tail_payload['nro_documento']}",
-            "doc_legal": f"{payload['doc_legal_prefix']}{tail_payload['doc_legal_tail']}",
+            "nro_documento": normalize_code_like_field(f"EPS-{tail_payload['nro_documento']}"),
+            "doc_legal": normalize_code_like_field(f"{payload['doc_legal_prefix']}{tail_payload['doc_legal_tail']}"),
             "monto_doc": to_decimal_flexible(payload["monto_doc"]),
             "monto_comision": to_decimal_flexible(payload["monto_comision"]),
             "pct_comision": to_decimal_flexible(payload["pct"]),

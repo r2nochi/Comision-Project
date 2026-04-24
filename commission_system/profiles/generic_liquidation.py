@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, normalize_for_match, normalize_spaces, to_decimal_flexible
+from ..utils import build_validation, clean_lines, normalize_code_like_field, normalize_for_match, normalize_spaces, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -140,8 +140,8 @@ class GenericLiquidationProfile(BaseProfile):
         return {
             "fecha_inicio": payload["fecha_inicio"],
             "descripcion": description,
-            "document_number": document_number,
-            "document_legal": document_legal,
+            "document_number": normalize_code_like_field(document_number),
+            "document_legal": normalize_code_like_field(document_legal),
             "monto_comision": to_decimal_flexible(payload["monto_comision"]),
             "pct_comision": to_decimal_flexible(payload["pct"]),
             "identificacion": payload["identificacion"],

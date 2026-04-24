@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, normalize_for_match, normalize_spaces, to_decimal_flexible
+from ..utils import build_validation, clean_lines, normalize_code_like_field, normalize_for_match, normalize_spaces, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -158,7 +158,7 @@ class RimacPreliquidationProfile(BaseProfile):
         return {
             "descriptor": descriptor,
             "poliza": self._normalize_policy(payload["poliza"]),
-            "documento": payload["documento"],
+            "documento": normalize_code_like_field(payload["documento"], allowed="A-Z0-9-"),
             "doc_sunat": self._normalize_doc_sunat(doc_sunat),
             "tipo": normalize_for_match(payload["tipo"]),
             "fecha_pago": fecha_pago,
@@ -305,8 +305,8 @@ class RimacPreliquidationProfile(BaseProfile):
         return f"{match.group('int')}.{match.group('dec')}0"
 
     def _normalize_policy(self, value: str) -> str:
-        return re.sub(r"[^A-Z0-9]", "", value.upper())
+        return re.sub(r"[^A-Z0-9]", "", normalize_code_like_field(value, allowed="A-Z0-9"))
 
     def _normalize_doc_sunat(self, value: str) -> str:
-        normalized = re.sub(r"[^A-Z0-9-]", "", value.upper())
+        normalized = re.sub(r"[^A-Z0-9-]", "", normalize_code_like_field(value, allowed="A-Z0-9-"))
         return normalized.replace("--", "-")

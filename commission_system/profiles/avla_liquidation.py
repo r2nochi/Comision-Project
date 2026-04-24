@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, find_prefixed_value, normalize_for_match, to_decimal_flexible
+from ..utils import build_validation, clean_lines, find_prefixed_value, normalize_code_like_field, normalize_for_match, replace_ocr_o_with_zero_in_numeric_segments, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -55,13 +55,14 @@ class AvlaLiquidationProfile(BaseProfile):
     def _extract_document_number(self, lines: list[str], fallback: str) -> str | None:
         value = find_prefixed_value(lines, "N. LIQUID")
         if value:
-            return value.replace(" ", "")
+            return normalize_code_like_field(value, allowed="A-Z0-9")
         match = re.search(r"([A-Z]{2}\d{4,})", fallback, flags=re.IGNORECASE)
         return match.group(1) if match else fallback
 
     def _extract_detail_rows(self, lines: list[str]) -> list[dict]:
         rows: list[dict] = []
         for line in lines:
+            line = replace_ocr_o_with_zero_in_numeric_segments(line)
             match = DETAIL_RE.match(line)
             if not match:
                 continue
@@ -69,7 +70,7 @@ class AvlaLiquidationProfile(BaseProfile):
             rows.append(
                 {
                     "tomador": payload["tomador"],
-                    "poliza": payload["poliza"],
+                    "poliza": normalize_code_like_field(payload["poliza"], allowed="A-Z0-9"),
                     "fecha": payload["fecha"],
                     "moneda": payload["moneda"],
                     "base": to_decimal_flexible(payload["base"]),

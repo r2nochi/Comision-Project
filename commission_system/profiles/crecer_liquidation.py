@@ -4,7 +4,7 @@ import re
 from decimal import Decimal, ROUND_HALF_UP
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import clean_lines, normalize_spaces, to_decimal_flexible
+from ..utils import clean_lines, normalize_code_like_field, normalize_spaces, to_decimal_flexible
 from .generic_liquidation import GenericLiquidationProfile
 from .rotatable_liquidation_layout import (
     _score_candidate,
@@ -191,8 +191,8 @@ class CrecerLiquidationProfile(GenericLiquidationProfile):
         return {
             "fecha_inicio": payload["fecha_inicio"],
             "descripcion": descripcion,
-            "document_number": payload["document_number"],
-            "document_legal": payload["document_legal"],
+            "document_number": normalize_code_like_field(payload["document_number"]),
+            "document_legal": normalize_code_like_field(payload["document_legal"]),
             "monto_documento": monto_documento,
             "monto_comision": monto_comision,
             "pct_comision": pct_comision,

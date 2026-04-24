@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, normalize_spaces, to_decimal_flexible
+from ..utils import build_validation, clean_lines, normalize_code_like_field, normalize_spaces, replace_ocr_o_with_zero_in_numeric_segments, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -29,14 +29,14 @@ class CesceLiquidationProfile(BaseProfile):
         detail_rows, warnings = self._extract_detail_rows(lines)
         reported_totals = self._extract_totals(lines)
         validations = self._build_validations(detail_rows, reported_totals)
-        document_match = re.search(r"LIQUIDACIONES\s+DE\s+COMISIONES\s+NRO:\s*([0-9]+)", text, flags=re.IGNORECASE)
+        document_match = re.search(r"LIQUIDACIONES\s+DE\s+COMISIONES\s+NRO:\s*([0-9O]+)", text, flags=re.IGNORECASE)
 
         return ParsedDocument(
             source_file=context.file_path.name,
             source_stem=context.file_path.stem,
             detected_insurer=self.insurer,
             detected_profile=self.display_name,
-            document_number=document_match.group(1) if document_match else context.file_path.stem,
+            document_number=normalize_code_like_field(document_match.group(1), allowed="A-Z0-9") if document_match else context.file_path.stem,
             document_type="Liquidaciones de Comisiones",
             broker="LA PROTECTORA CORREDORES DE SEGUROS SA",
             currency="S/",
@@ -57,6 +57,7 @@ class CesceLiquidationProfile(BaseProfile):
             if self._skip_line(line):
                 continue
             normalized = normalize_spaces(line)
+            normalized = replace_ocr_o_with_zero_in_numeric_segments(normalized)
             normalized = re.sub(r"\b(?:e|ile)\b\s+(NCREDITO|FACTURA)\b", r"\1", normalized, flags=re.IGNORECASE)
             match = DETAIL_RE.match(normalized)
             if not match:
@@ -66,9 +67,9 @@ class CesceLiquidationProfile(BaseProfile):
             rows.append(
                 {
                     "cliente": cliente,
-                    "poliza": poliza,
+                    "poliza": normalize_code_like_field(poliza, allowed="A-Z0-9-"),
                     "tipo_doc": payload["tipo_doc"],
-                    "nro_doc": payload["nro_doc"],
+                    "nro_doc": normalize_code_like_field(payload["nro_doc"], allowed="A-Z0-9-"),
                     "fecha_pago": payload["fecha_pago"],
                     "pct_comision": to_decimal_flexible(payload["pct"]),
                     "moneda": payload["moneda"],

@@ -15,6 +15,35 @@ def normalize_for_match(value: str) -> str:
     return normalize_spaces(ascii_text).upper()
 
 
+def replace_ocr_o_with_zero_in_numeric_segments(value: str) -> str:
+    text = str(value)
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if not _looks_numeric_like_token(token):
+            return token
+        normalized = re.sub(r"[Oo]", "0", token)
+        return re.sub(r"[IlL]", "1", normalized)
+
+    return re.sub(r"[A-Za-z0-9]+", _replace, text)
+
+
+def normalize_code_like_field(value: str, *, allowed: str = "A-Z0-9/.-") -> str:
+    normalized = normalize_spaces(str(value)).upper()
+    normalized = normalized.replace("—", "-").replace("–", "-").replace("=", "-")
+    normalized = replace_ocr_o_with_zero_in_numeric_segments(normalized)
+    normalized = normalized.replace(" ", "")
+    normalized = re.sub(fr"[^{allowed}]+", "", normalized)
+    normalized = normalized.replace("..", ".")
+    return normalized.strip("-")
+
+
+def _looks_numeric_like_token(token: str) -> bool:
+    if re.search(r"\d", token):
+        return True
+    return bool(re.fullmatch(r"[OILoil]{1,3}", token))
+
+
 def clean_lines(text: str) -> list[str]:
     lines: list[str] = []
     for raw_line in text.splitlines():
