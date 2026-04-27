@@ -92,6 +92,11 @@ class RimacPreliquidationProfile(BaseProfile):
         for line in lines:
             if self._skip_line(line):
                 continue
+            if self._is_footer_line(line):
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = []
+                continue
             if re.match(r"^(EPS|S\.C\.T\.R\.)", line):
                 if current_chunk:
                     chunks.append(current_chunk)
@@ -154,10 +159,12 @@ class RimacPreliquidationProfile(BaseProfile):
             pct = to_decimal_flexible(amount_match.group("pct"))
             comision = to_decimal_flexible(amount_match.group("comision"))
 
-        descriptor = normalize_spaces(" ".join(part for part in [payload["producto"], payload["cliente"], client_continuation] if part))
+        producto = self._normalize_producto(payload["producto"])
+        cliente = self._normalize_cliente(" ".join(part for part in [payload["cliente"], client_continuation] if part))
         return {
-            "descriptor": descriptor,
-            "poliza": self._normalize_policy(payload["poliza"]),
+            "producto": producto,
+            "poliza": self._normalize_policy(payload["poliza"], producto),
+            "cliente": cliente,
             "documento": normalize_code_like_field(payload["documento"], allowed="A-Z0-9-"),
             "doc_sunat": self._normalize_doc_sunat(doc_sunat),
             "tipo": normalize_for_match(payload["tipo"]),
@@ -192,6 +199,20 @@ class RimacPreliquidationProfile(BaseProfile):
                 "COMISIONPRIMA",
                 "TOTAL",
             )
+        )
+
+    def _is_footer_line(self, line: str) -> bool:
+        upper = normalize_for_match(self._normalize_line(line))
+        return (
+            bool(re.match(r"^(?:[IL1]\.?G\.?V\.?)\b", upper))
+            or bool(re.match(r"^TOTA[LI]\s+-?[\d,]+\.\d{2}$", upper))
+            or bool(re.match(r"^LIMA,\s*\d{1,2}\s+DE\b", upper))
+            or "EL CORREDOR DE SEGUROS, A QUIEN SE LE HACE ENTREGA DE LA PRESENTE PRE-LIQUIDACION" in upper
+            or "POR PARTE DE LAS SUMAS INDICADAS EN DICHA PRE-LIQUIDACION" in upper
+            or "TASAS O PORCENTAJES APLICADOS PARA EL CALCULO DE LOS SENALADOS IMPORTES" in upper
+            or "LA OBLIGACION DE PAGO DE LAS SUMAS DESCRITAS EN LA PRESENTE PRE-LIQUIDACION" in upper
+            or upper == 'MODALIDAD".'
+            or upper == "MODALIDAD."
         )
 
     def _extract_totals(self, text: str) -> list[dict]:
@@ -271,6 +292,8 @@ class RimacPreliquidationProfile(BaseProfile):
     def _build_continuation_text(self, continuation_lines: list[str], doc_tail: str) -> str:
         cleaned_parts: list[str] = []
         for line in continuation_lines:
+            if self._is_footer_line(line):
+                break
             cleaned = line
             if doc_tail:
                 cleaned = cleaned.replace(doc_tail, " ")
@@ -304,8 +327,42 @@ class RimacPreliquidationProfile(BaseProfile):
             return f"{match.group('int')}.{match.group('dec')}{trailing_digit}"
         return f"{match.group('int')}.{match.group('dec')}0"
 
-    def _normalize_policy(self, value: str) -> str:
-        return re.sub(r"[^A-Z0-9]", "", normalize_code_like_field(value, allowed="A-Z0-9"))
+    def _normalize_producto(self, value: str) -> str:
+        normalized = normalize_spaces(value).upper()
+        normalized = normalized.replace("S.C.T.R.-", "S.C.T.R. - ").replace("S.C.T.R.- ", "S.C.T.R. - ")
+        normalized = normalized.replace("S.C.T.R. - SALU", "S.C.T.R. - SALU")
+        return normalized
+
+    def _normalize_cliente(self, value: str) -> str:
+        normalized = normalize_spaces(value)
+        normalized = re.sub(r"(?<=[A-Z])(?=(SCRL|SAC|SRL|EIRL)\b)", " ", normalized)
+        normalized = re.sub(r"(?<=[A-Z])(?=(S\.A\.C\.|S\.A\.|S\.R\.L\.)\b)", " ", normalized)
+        return normalize_spaces(normalized)
+
+    def _normalize_policy(self, value: str, producto: str) -> str:
+        normalized = re.sub(r"[^A-Z0-9]", "", normalize_spaces(str(value)).upper())
+        normalized = normalized.replace("O", "0").replace("I", "1").replace("L", "1")
+        expected_prefix = self._expected_policy_prefix(producto)
+        if not expected_prefix:
+            return normalized
+
+        digits = "".join(character for character in normalized if character.isdigit())
+        if len(digits) >= 7:
+            tail = digits[-7:]
+            return f"{expected_prefix}{tail}"
+        if normalized.startswith(expected_prefix):
+            return normalized
+        return f"{expected_prefix}{digits.rjust(7, '0')}"
+
+    def _expected_policy_prefix(self, producto: str) -> str | None:
+        normalized = normalize_for_match(producto)
+        if normalized == "EPS":
+            return "00E"
+        if "PENS" in normalized:
+            return "00P"
+        if "SALU" in normalized:
+            return "00S"
+        return None
 
     def _normalize_doc_sunat(self, value: str) -> str:
         normalized = re.sub(r"[^A-Z0-9-]", "", normalize_code_like_field(value, allowed="A-Z0-9-"))
