@@ -69,7 +69,7 @@ class AvlaLiquidationProfile(BaseProfile):
             payload = match.groupdict()
             rows.append(
                 {
-                    "tomador": payload["tomador"],
+                    "tomador": self._normalize_tomador(payload["tomador"]),
                     "poliza": normalize_code_like_field(payload["poliza"], allowed="A-Z0-9"),
                     "fecha": payload["fecha"],
                     "moneda": payload["moneda"],
@@ -80,6 +80,15 @@ class AvlaLiquidationProfile(BaseProfile):
                 }
             )
         return rows
+
+    def _normalize_tomador(self, value: str) -> str:
+        normalized = " ".join(value.split())
+        replacements = {
+            " DECOL": " DE COL",
+        }
+        for source, target in replacements.items():
+            normalized = normalized.replace(source, target)
+        return normalized
 
     def _extract_totals(self, lines: list[str]) -> list[dict]:
         labels = {
