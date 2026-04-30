@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import re
 
 from positiva_extractor.parser import parse_positiva_document
 
 from ..models import ParseContext, ParsedDocument
+from ..utils import normalize_for_match, normalize_spaces
 from .base import BaseProfile
 
 
@@ -25,12 +27,14 @@ class PositivaBoletaProfile(BaseProfile):
         )
 
         reported_totals: list[dict] = []
-        for office_total in legacy.office_totals:
+        for office_index, office_total in enumerate(legacy.office_totals):
             reported_totals.append(
                 {
                     "scope": office_total.office,
                     "metric": "total_comision_oficina",
                     "value": office_total.total_comision,
+                    "scope_order": office_index,
+                    "metric_order": 0,
                 }
             )
             reported_totals.append(
@@ -38,23 +42,35 @@ class PositivaBoletaProfile(BaseProfile):
                     "scope": office_total.office,
                     "metric": "total_descuento_oficina",
                     "value": office_total.total_descuento,
+                    "scope_order": office_index,
+                    "metric_order": 1,
                 }
             )
 
-        document_totals = {
-            "total_comision": legacy.total_comision,
-            "total_descuento": legacy.total_descuento,
-            "total_neto": legacy.total_neto,
-            "igv_amount": legacy.igv_amount,
-            "total_general": legacy.total_general,
-        }
-        for metric, value in document_totals.items():
+        document_scope_order = len(legacy.office_totals)
+        document_totals = [
+            ("total_comision", legacy.total_comision, 0),
+            ("total_descuento", legacy.total_descuento, 1),
+            ("total_neto", legacy.total_neto, 2),
+            ("igv_amount", legacy.igv_amount, 3),
+            ("total_general", legacy.total_general, 4),
+        ]
+        for metric, value, metric_order in document_totals:
             if value is None:
                 continue
-            reported_totals.append({"scope": "DOCUMENTO", "metric": metric, "value": value})
+            reported_totals.append(
+                {
+                    "scope": "DOCUMENTO",
+                    "metric": metric,
+                    "value": value,
+                    "scope_order": document_scope_order,
+                    "metric_order": metric_order,
+                }
+            )
 
         detail_rows = [
-            {
+            self._normalize_detail_row(
+                {
                 "office": row.office,
                 "subentity": row.entity,
                 "ramo": row.ramo,
@@ -68,6 +84,7 @@ class PositivaBoletaProfile(BaseProfile):
                 "descuento": row.descuento,
                 "raw_line": row.raw_line,
             }
+            )
             for row in legacy.detail_rows
         ]
 
@@ -109,3 +126,42 @@ class PositivaBoletaProfile(BaseProfile):
             validations=validations,
             warnings=list(legacy.warnings),
         )
+
+    def _normalize_detail_row(self, row: dict) -> dict:
+        normalized = dict(row)
+        normalized["ramo"] = self._normalize_ramo(str(normalized.get("ramo", "")))
+        normalized["description"] = self._normalize_description(str(normalized.get("description", "")))
+        return normalized
+
+    def _normalize_ramo(self, value: str) -> str:
+        normalized = normalize_spaces(value)
+        upper = normalize_for_match(normalized)
+        if "BOLETA DE LIQUID" not in upper and len(normalized) < 80:
+            return normalized
+
+        known_ramos = [
+            "VIDA LEY D.L. 688",
+            "ACCIDENTES PERSONALES",
+            "VEHICULOS",
+            "INCENDIO",
+            "SCTR",
+            "SOAT",
+        ]
+        for ramo in known_ramos:
+            if normalize_for_match(ramo) in upper:
+                return ramo
+        return normalized
+
+    def _normalize_description(self, value: str) -> str:
+        normalized = normalize_spaces(value)
+        normalized = re.sub(r"^[—–-]+\s*", "", normalized)
+        normalized = re.sub(r"\bRC\s+8\s+HA\b", "RC & HA", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\bJ\.M\.F\.\s+8\s+S\b", "J.M.F. & S", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(
+            r"\bC\s*E\s*P\s+REVERENDO\s+HNO\s+GASTON\s+MARIA\s+S\.?\b",
+            "C E P REVERENDO HNO GASTON MARIA S",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        normalized = normalized.replace("C E P REVERENDO HNO GASTON MARIA S.", "C E P REVERENDO HNO GASTON MARIA S")
+        return normalize_spaces(normalized)

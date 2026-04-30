@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from ..models import ParseContext, ParsedDocument
-from ..utils import build_validation, clean_lines, normalize_code_like_field, normalize_for_match, replace_ocr_o_with_zero_in_numeric_segments, to_decimal_flexible
+from ..utils import build_validation, clean_lines, normalize_code_like_field, normalize_for_match, normalize_spaces, replace_ocr_o_with_zero_in_numeric_segments, to_decimal_flexible
 from .base import BaseProfile
 
 
@@ -68,7 +68,7 @@ class SanitasEpsProfile(BaseProfile):
                         warnings.append(f"Fila SANITAS no parseada: {' '.join(buffer)}")
                     buffer = []
                 continue
-            is_row_start = bool(re.match(r"^\d{2}/\d{2}/\d{4}\b(?!\s*-)", line))
+            is_row_start = bool(re.match(r"^\d{2}/\d{2}/\d{4}\s+(?:POTESTATIVO|PLAN)\b", normalize_for_match(line)))
             if is_row_start and buffer and not buffer[-1].endswith("-"):
                 parsed = self._parse_buffer(buffer)
                 if parsed:
@@ -87,16 +87,13 @@ class SanitasEpsProfile(BaseProfile):
         return rows, warnings
 
     def _parse_buffer(self, buffer: list[str]) -> dict | None:
-        candidate = " ".join(buffer)
-        candidate = replace_ocr_o_with_zero_in_numeric_segments(candidate)
-        candidate = re.sub(r"EPS-\s+(?=\d)", "EPS-", candidate)
-        candidate = re.sub(r"([BF]\d{3}-?)\s+(\d+)", lambda match: f"{match.group(1)}{match.group(2)}", candidate)
-        candidate = re.sub(r"(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})", r"\1 - \2", candidate)
-        candidate = re.sub(r"\s+", " ", candidate).strip()
-        match = DETAIL_RE.match(candidate)
+        candidate_original = self._prepare_candidate(buffer, normalize_ocr_numeric_segments=False)
+        candidate_match = self._prepare_candidate(buffer, normalize_ocr_numeric_segments=True)
+        match = DETAIL_RE.match(candidate_match)
         if not match:
             return self._parse_scan_buffer(buffer)
         payload = match.groupdict()
+        cliente = candidate_original[match.start("cliente") : match.end("cliente")]
         return {
             "fecha_inicio": payload["fecha_inicio"],
             "producto": payload["producto"],
@@ -109,37 +106,40 @@ class SanitasEpsProfile(BaseProfile):
             "monto_comision": to_decimal_flexible(payload["monto_comision"]),
             "pct_comision": to_decimal_flexible(payload["pct"]),
             "identificacion": payload["identificacion"],
-            "cliente": payload["cliente"],
-            "raw_line": candidate,
+            "cliente": self._normalize_cliente(cliente, payload["producto"]),
+            "raw_line": candidate_original,
         }
 
     def _parse_scan_buffer(self, buffer: list[str]) -> dict | None:
-        candidate = re.sub(r"\s+", " ", " ".join(buffer)).strip()
-        candidate = replace_ocr_o_with_zero_in_numeric_segments(candidate)
-        candidate = re.sub(r"EPS-\s+(?=\d)", "EPS-", candidate)
-        candidate = candidate.replace("FO02-", "F002-").replace("FO002-", "F002-").replace("BO02-", "B002-")
+        candidate_original = self._prepare_scan_candidate(buffer, normalize_ocr_numeric_segments=False)
+        candidate_match = self._prepare_scan_candidate(buffer, normalize_ocr_numeric_segments=True)
 
         head_match = re.match(
             r"^(?P<fecha_inicio>\d{2}/\d{2}/\d{4})\s+(?P<producto>.+?)\s+(?P<vigencia_inicio>\d{2}/\d{2}/\d{4})\s*-\s+"
             r"(?P<tipo_documento>[A-Z]{3})\s+(?P<contrato>\d+)\s+EPS-\s+(?P<doc_legal_prefix>[BF]\d{3}-)\s+"
             r"(?P<monto_doc>-?[\d,]+\.\d{3})\s+(?P<monto_comision>-?[\d,]+\.\d{3})\s+\((?P<pct>[\d.]+)(?:\s*%\)?)?\s+"
             r"(?P<identificacion>\d{8,14})\s+(?P<rest>.+)$",
-            candidate,
+            candidate_match,
         )
         if not head_match:
             return None
         payload = head_match.groupdict()
+        rest_original = candidate_original[head_match.start("rest") : head_match.end("rest")]
+        rest_match = payload["rest"]
         tail_match = re.search(
             r"(?P<cliente_1>.+?)\s+(?P<vigencia_fin>\d{2}/\d{2}/\d{4})\s+(?P<nro_documento>\d+)\s+(?P<doc_legal_tail>\d+)\s*(?P<cliente_2>.*)$",
-            payload["rest"],
+            rest_match,
         )
         if not tail_match:
             return None
         tail_payload = tail_match.groupdict()
-        cliente = re.sub(r"\s+", " ", f"{tail_payload['cliente_1']} {tail_payload['cliente_2']}").strip()
+        cliente_1 = rest_original[tail_match.start("cliente_1") : tail_match.end("cliente_1")]
+        cliente_2 = rest_original[tail_match.start("cliente_2") : tail_match.end("cliente_2")]
+        producto = self._normalize_scan_producto(payload["producto"], rest_original)
+        cliente = self._normalize_cliente(f"{cliente_1} {cliente_2}", producto)
         return {
             "fecha_inicio": payload["fecha_inicio"],
-            "producto": payload["producto"].strip(),
+            "producto": producto,
             "vigencia": f"{payload['vigencia_inicio']} - {tail_payload['vigencia_fin']}",
             "tipo_documento": payload["tipo_documento"],
             "contrato": payload["contrato"],
@@ -150,8 +150,59 @@ class SanitasEpsProfile(BaseProfile):
             "pct_comision": to_decimal_flexible(payload["pct"]),
             "identificacion": payload["identificacion"],
             "cliente": cliente,
-            "raw_line": candidate,
+            "raw_line": candidate_original,
         }
+
+    def _prepare_candidate(self, buffer: list[str], *, normalize_ocr_numeric_segments: bool) -> str:
+        candidate = " ".join(buffer)
+        if normalize_ocr_numeric_segments:
+            candidate = replace_ocr_o_with_zero_in_numeric_segments(candidate)
+        candidate = re.sub(r"EPS-\s+(?=\d)", "EPS-", candidate)
+        candidate = re.sub(r"([BF]\d{3}-?)\s+(\d+)", lambda match: f"{match.group(1)}{match.group(2)}", candidate)
+        candidate = re.sub(r"(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})", r"\1 - \2", candidate)
+        return normalize_spaces(candidate)
+
+    def _prepare_scan_candidate(self, buffer: list[str], *, normalize_ocr_numeric_segments: bool) -> str:
+        candidate = " ".join(buffer)
+        if normalize_ocr_numeric_segments:
+            candidate = replace_ocr_o_with_zero_in_numeric_segments(candidate)
+        candidate = candidate.replace("—EPS-", " EPS-").replace("–EPS-", " EPS-")
+        candidate = re.sub(r"EPS-\s+(?=\d)", "EPS-", candidate)
+        candidate = re.sub(r"(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})", r"\1 - \2", candidate)
+        candidate = normalize_spaces(candidate)
+        return (
+            candidate.replace("FO02-", "F002-")
+            .replace("FO002-", "F002-")
+            .replace("F0002-", "F002-")
+            .replace("BO02-", "B002-")
+            .replace("B0002-", "B002-")
+        )
+
+    def _normalize_scan_producto(self, value: str, rest_original: str) -> str:
+        normalized = normalize_spaces(value)
+        upper_rest = normalize_for_match(rest_original)
+        if normalize_for_match(normalized) == "POTESTATIVO":
+            if "FAMILIAR" in upper_rest:
+                return "Potestativo Familiar"
+            if "CORPORATIVO" in upper_rest:
+                return "Potestativo Corporativo"
+        return normalized
+
+    def _normalize_cliente(self, value: str, producto: str) -> str:
+        normalized = normalize_spaces(value)
+        normalized = re.sub(r"\s*\(?%\)?\s*", " ", normalized)
+        for token in ("FAMILIAR", "CORPORATIVO", "REGULAR"):
+            normalized = re.sub(rf"\b{token.title()}\b", " ", normalized, count=1)
+            normalized = re.sub(rf"\b{token}\b", " ", normalized, count=1)
+        normalized = normalize_spaces(normalized)
+        normalized = re.sub(
+            r"(?P<head>[A-ZÁÉÍÓÚÑ]+,[A-ZÁÉÍÓÚÑ]{2,})\s+(?P<tail>[A-ZÁÉÍÓÚÑ]{1,3})\b",
+            lambda match: match.group("head") + match.group("tail")
+            if normalize_for_match(match.group("tail")) not in {"DE", "DEL", "LA", "LAS", "LOS", "Y"}
+            else match.group(0),
+            normalized,
+        )
+        return normalize_spaces(normalized)
 
     def _skip_line(self, line: str) -> bool:
         upper = normalize_for_match(line)

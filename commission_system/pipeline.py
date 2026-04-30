@@ -75,7 +75,7 @@ def process_file(file_path: str | Path, *, expected_insurer: str | None = None) 
     document.detection_markers = markers
     document.warnings.extend(warnings)
 
-    if input_mode == "scan" and getattr(profile, "profile_id", "") == "sanitas_eps" and len(document.detail_rows) < 10:
+    if input_mode == "scan" and getattr(profile, "profile_id", "") == "sanitas_eps":
         retry_extraction = extract_scan_text_fixed(path, psm=6, render_scale=3.0)
         retry_context = ParseContext(
             file_path=path,
@@ -84,7 +84,9 @@ def process_file(file_path: str | Path, *, expected_insurer: str | None = None) 
             page_count=retry_extraction.page_count,
         )
         retry_document = profile.parse(retry_extraction.text, retry_context)
-        if len(retry_document.detail_rows) > len(document.detail_rows):
+        current_score = (len(document.detail_rows), -len(document.warnings))
+        retry_score = (len(retry_document.detail_rows), -len(retry_document.warnings))
+        if retry_score > current_score:
             retry_document.detection_score = score
             retry_document.detection_markers = markers
             retry_document.warnings.extend(warnings)

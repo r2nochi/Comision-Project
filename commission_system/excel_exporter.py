@@ -13,16 +13,16 @@ DETAIL_PREFERRED_ORDER = [
     "source_stem",
     "detected_insurer",
     "detected_profile",
-    "document_number",
     "document_type",
     "input_mode",
     "fecha_inicio",
     "fecha",
     "document_tipo",
     "descripcion",
+    "tipo_documento",
+    "document_number",
     "tipo",
     "document_legal",
-    "tipo_documento",
     "nro_documento",
     "nro_doc",
     "doc_legal",
@@ -115,6 +115,95 @@ QUALITAS_DETAIL_ORDER = [
     "pago_comision",
 ]
 
+POSITIVA_DETAIL_ORDER = [
+    "ramo",
+    "poliza",
+    "document",
+    "issue_date",
+    "description",
+    "prima_neta",
+    "pct_comision",
+    "comision",
+    "descuento",
+    "raw_line",
+]
+
+SANITAS_EPS_DETAIL_ORDER = [
+    "fecha_inicio",
+    "producto",
+    "vigencia",
+    "tipo_documento",
+    "contrato",
+    "nro_documento",
+    "doc_legal",
+    "monto_doc",
+    "monto_comision",
+    "pct_comision",
+    "identificacion",
+    "cliente",
+]
+
+SANITAS_LIQ_DETAIL_ORDER = [
+    "fecha_inicio",
+    "tipo_documento",
+    "document_number",
+    "document_legal",
+    "monto_documento",
+    "monto_comision",
+    "pct_comision",
+    "identificacion",
+    "cliente",
+]
+
+CRECER_DETAIL_ORDER = [
+    "fecha_inicio",
+    "document_tipo",
+    "document_number",
+    "document_legal",
+    "monto_documento",
+    "monto_comision",
+    "pct_comision",
+    "identificacion",
+    "cliente",
+]
+
+PROTECTA_DETAIL_ORDER = [
+    "fecha_inicio",
+    "document_tipo",
+    "document_number",
+    "document_legal",
+    "monto_documento",
+    "monto_comision",
+    "pct_comision",
+    "identificacion",
+    "cliente",
+]
+
+CESCE_DETAIL_ORDER = [
+    "cliente",
+    "poliza",
+    "tipo_doc",
+    "nro_doc",
+    "fecha_pago",
+    "pct_comision",
+    "moneda",
+    "prima_neta",
+    "comision_total",
+    "comision_pagar",
+    "raw_line",
+]
+
+AVLA_DETAIL_ORDER = [
+    "tomador",
+    "poliza",
+    "fecha",
+    "moneda",
+    "base",
+    "pct_comision",
+    "monto_comision",
+    "raw_line",
+]
+
 RIMAC_DETAIL_ORDER = [
     "producto",
     "poliza",
@@ -130,8 +219,13 @@ RIMAC_DETAIL_ORDER = [
 
 TOTAL_METRIC_ORDER = [
     "total_comision",
-    "igv",
     "total_general",
+    "total_documento",
+    "total_monto_doc",
+    "total_sin_impuestos_detalle",
+    "total_sin_impuestos",
+    "igv",
+    "total_a_cobrar",
     "saldo_anterior",
     "comision_total_periodo",
     "comision_total_periodo_resumen",
@@ -148,6 +242,24 @@ TOTAL_METRIC_ORDER = [
     "valor_venta",
     "valor_total",
 ]
+
+PROFILE_TOTAL_METRIC_ORDER = {
+    "AVLA Liquidacion": [
+        "total_comision",
+        "igv",
+        "total_a_pagar",
+    ],
+    "Rimac Preliquidacion": [
+        "total_general",
+        "igv",
+        "total_comision",
+    ],
+    "Cesce Liquidacion": [
+        "valor_venta",
+        "igv",
+        "valor_total",
+    ],
+}
 
 
 def export_results(documents: list[ParsedDocument], output_path: str | Path) -> Path:
@@ -201,6 +313,20 @@ def _prepare_detail_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
     if _has_columns(ordered, QUALITAS_DETAIL_ORDER):
         ordered = _reorder_detail_block(ordered, QUALITAS_DETAIL_ORDER)
+    if _has_columns(ordered, POSITIVA_DETAIL_ORDER):
+        ordered = _reorder_detail_block(ordered, POSITIVA_DETAIL_ORDER)
+    if _has_columns(ordered, SANITAS_EPS_DETAIL_ORDER):
+        ordered = _reorder_detail_block(ordered, SANITAS_EPS_DETAIL_ORDER)
+    if _has_columns(ordered, SANITAS_LIQ_DETAIL_ORDER):
+        ordered = _reorder_detail_block(ordered, SANITAS_LIQ_DETAIL_ORDER)
+    if _has_columns(ordered, CRECER_DETAIL_ORDER):
+        ordered = _reorder_detail_block(ordered, CRECER_DETAIL_ORDER)
+    if _has_columns(ordered, PROTECTA_DETAIL_ORDER):
+        ordered = _reorder_detail_block(ordered, PROTECTA_DETAIL_ORDER)
+    if _has_columns(ordered, CESCE_DETAIL_ORDER):
+        ordered = _reorder_detail_block(ordered, CESCE_DETAIL_ORDER)
+    if _has_columns(ordered, AVLA_DETAIL_ORDER):
+        ordered = _reorder_detail_block(ordered, AVLA_DETAIL_ORDER)
     if _has_columns(ordered, RIMAC_DETAIL_ORDER):
         ordered = _reorder_detail_block(ordered, RIMAC_DETAIL_ORDER)
 
@@ -222,15 +348,33 @@ def _prepare_total_frame(frame: pd.DataFrame) -> pd.DataFrame:
     ordered = frame.loc[:, [*preferred, *remaining]]
 
     if "metric" in ordered.columns:
-        metric_rank = {metric: index for index, metric in enumerate(TOTAL_METRIC_ORDER)}
-        rank_column = ordered["metric"].map(lambda value: metric_rank.get(value, len(metric_rank) + 100))
+        global_metric_rank = {metric: index for index, metric in enumerate(TOTAL_METRIC_ORDER)}
+        profile_metric_rank = {
+            profile: {metric: index for index, metric in enumerate(metrics)}
+            for profile, metrics in PROFILE_TOTAL_METRIC_ORDER.items()
+        }
+        rank_column = ordered.apply(
+            lambda row: _metric_rank_for_row(
+                metric=row.get("metric"),
+                profile=row.get("detected_profile"),
+                global_metric_rank=global_metric_rank,
+                profile_metric_rank=profile_metric_rank,
+            ),
+            axis=1,
+        )
+        scope_rank = ordered["scope_order"] if "scope_order" in ordered.columns else pd.Series([10_000] * len(ordered), index=ordered.index)
+        metric_order = ordered["metric_order"] if "metric_order" in ordered.columns else pd.Series([10_000] * len(ordered), index=ordered.index)
         ordered = (
-            ordered.assign(_metric_rank=rank_column)
+            ordered.assign(_scope_rank=scope_rank, _metric_order=metric_order, _metric_rank=rank_column)
             .sort_values(
-                by=[column for column in ("source_file", "scope", "_metric_rank") if column in ordered.columns or column == "_metric_rank"],
+                by=[
+                    column
+                    for column in ("source_file", "_scope_rank", "_metric_order", "scope", "_metric_rank")
+                    if column in ordered.columns or column in {"_scope_rank", "_metric_order", "_metric_rank"}
+                ],
                 kind="stable",
             )
-            .drop(columns="_metric_rank")
+            .drop(columns=[column for column in ("_scope_rank", "_metric_order", "_metric_rank", "scope_order", "metric_order") if column in ordered.columns])
             .reset_index(drop=True)
         )
 
@@ -255,3 +399,10 @@ def _reorder_detail_block(frame: pd.DataFrame, desired_block: list[str]) -> pd.D
 
     suffix_columns = [column for column in frame.columns if column not in set(prefix_columns) | seen_block]
     return frame.loc[:, [*prefix_columns, *existing_block, *suffix_columns]]
+
+
+def _metric_rank_for_row(*, metric, profile, global_metric_rank: dict[str, int], profile_metric_rank: dict[str, dict[str, int]]) -> int:
+    profile_order = profile_metric_rank.get(str(profile or ""))
+    if profile_order and metric in profile_order:
+        return profile_order[metric]
+    return global_metric_rank.get(metric, len(global_metric_rank) + 100)

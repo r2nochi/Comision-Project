@@ -335,6 +335,7 @@ class RimacPreliquidationProfile(BaseProfile):
 
     def _normalize_cliente(self, value: str) -> str:
         normalized = normalize_spaces(value)
+        normalized = re.sub(r"\b([A-Z])Y([A-Z])(?=[A-Z]{3,})", r"\1 Y \2 ", normalized)
         normalized = re.sub(r"(?<=[A-Z])(?=(SCRL|SAC|SRL|EIRL)\b)", " ", normalized)
         normalized = re.sub(r"(?<=[A-Z])(?=(S\.A\.C\.|S\.A\.|S\.R\.L\.)\b)", " ", normalized)
         return normalize_spaces(normalized)
