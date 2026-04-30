@@ -215,7 +215,7 @@ class CrecerLiquidationProfile(GenericLiquidationProfile):
             return overlay_value if len(overlay) > len(base) else base_value
 
         if field in {"document_number", "document_legal"}:
-            return overlay_value if self._code_quality(overlay) >= self._code_quality(base) else base_value
+            return overlay_value if self._code_quality(overlay) > self._code_quality(base) else base_value
 
         if field == "identificacion":
             if overlay.upper().startswith("RUC - ") and not base.upper().startswith("RUC - "):

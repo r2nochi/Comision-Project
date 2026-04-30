@@ -40,7 +40,7 @@ class QualitasLiquidationProfile(BaseProfile):
             reported_totals = [
                 row
                 for row in reported_totals
-                if row.get("metric") not in {"comision_total_periodo_resumen", "saldo_actual_neto_resumen"}
+                if row.get("metric") not in {"comision_total_periodo_resumen", "saldo_actual_neto_resumen", "igv_resumen"}
             ]
         validations = self._build_validations(detail_rows, reported_totals)
         folio_match = re.search(r"FOLIO:\s*([0-9O]+)", text, flags=re.IGNORECASE)
@@ -130,37 +130,54 @@ class QualitasLiquidationProfile(BaseProfile):
         )
 
     def _extract_totals(self, lines: list[str]) -> list[dict]:
-        metric_patterns = [
-            ("saldo_anterior", ("SALDO ANTERIOR",)),
-            ("comision_total_periodo_resumen", ("COMISION TOTAL PERIODO",)),
-            ("otros_cargos", ("OTROS CARGOS", "DTROS CARGOS", "TROS CARGOS")),
-            ("otros_abonos", ("OTROS ABONOS",)),
-            ("pago_comisiones_periodo_anterior", ("PAGO COMISIONES PERIODO ANTERIOR",)),
-            ("pago_detracciones_periodo_anterior", ("PAGO DETRACCIONES PERIODO ANTERIOR",)),
-            ("saldo_actual_neto_resumen", ("SALDO ACTUAL NETO",)),
-            ("igv", ("I.G.V.", "IGV", "IGV.PAG.", "LG.V.")),
-            ("saldo_actual_total", ("SALDO ACTUAL TOTAL",)),
-            ("saldo_actual_neto", ("IMPORTE",)),
-            ("comision_total_periodo", ("TOTAL",)),
-        ]
         totals_by_metric: dict[str, dict] = {}
+        in_summary = False
         for line in lines:
             normalized = normalize_for_match(line)
             amount = self._extract_last_amount(line)
+            if normalized == "RESUMEN":
+                in_summary = True
+                continue
             if amount is None:
                 continue
 
-            for metric, labels in metric_patterns:
-                if not any(label in normalized for label in labels):
-                    continue
-                totals_by_metric[metric] = {
-                    "scope": "DOCUMENTO",
-                    "metric": metric,
-                    "value": to_decimal_flexible(amount),
-                }
-                break
+            metric = self._resolve_total_metric(normalized, in_summary=in_summary)
+            if not metric:
+                continue
+            totals_by_metric[metric] = {
+                "scope": "DOCUMENTO",
+                "metric": metric,
+                "value": to_decimal_flexible(amount),
+            }
 
         return list(totals_by_metric.values())
+
+    def _resolve_total_metric(self, normalized: str, *, in_summary: bool) -> str | None:
+        if "SALDO ANTERIOR" in normalized:
+            return "saldo_anterior"
+        if "COMISION TOTAL PERIODO" in normalized:
+            return "comision_total_periodo_resumen"
+        if any(label in normalized for label in ("OTROS CARGOS", "DTROS CARGOS", "TROS CARGOS")):
+            return "otros_cargos"
+        if "OTROS ABONOS" in normalized:
+            return "otros_abonos"
+        if "PAGO COMISIONES PERIODO ANTERIOR" in normalized:
+            return "pago_comisiones_periodo_anterior"
+        if "PAGO DETRACCIONES PERIODO ANTERIOR" in normalized:
+            return "pago_detracciones_periodo_anterior"
+        if "SALDO ACTUAL TOTAL" in normalized:
+            return "saldo_actual_total"
+        if "SALDO ACTUAL NETO" in normalized:
+            return "saldo_actual_neto_resumen"
+        if any(label in normalized for label in ("IGV.PAG.", "LG.V.")):
+            return "igv"
+        if "I.G.V." in normalized and in_summary:
+            return "igv_resumen"
+        if "IMPORTE" in normalized and not in_summary:
+            return "saldo_actual_neto"
+        if "TOTAL" in normalized and not in_summary:
+            return "comision_total_periodo"
+        return None
 
     def _extract_last_amount(self, value: str) -> str | None:
         matches = re.findall(r"-?[\d,]+\.\d{2}", value)

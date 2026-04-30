@@ -116,6 +116,8 @@ QUALITAS_DETAIL_ORDER = [
 ]
 
 POSITIVA_DETAIL_ORDER = [
+    "office",
+    "subentity",
     "ramo",
     "poliza",
     "document",
@@ -129,6 +131,7 @@ POSITIVA_DETAIL_ORDER = [
 ]
 
 SANITAS_EPS_DETAIL_ORDER = [
+    "document_number",
     "fecha_inicio",
     "producto",
     "vigencia",
@@ -204,6 +207,23 @@ AVLA_DETAIL_ORDER = [
     "raw_line",
 ]
 
+PACIFICO_SEG_DETAIL_ORDER = [
+    "item",
+    "producto",
+    "poliza",
+    "avcob",
+    "ram",
+    "document",
+    "concepto",
+    "fecha_pago",
+    "prima_comercial",
+    "derecho_emision",
+    "prima_afecta",
+    "pct_comision",
+    "monto_comision",
+    "raw_line",
+]
+
 RIMAC_DETAIL_ORDER = [
     "producto",
     "poliza",
@@ -249,15 +269,55 @@ PROFILE_TOTAL_METRIC_ORDER = {
         "igv",
         "total_a_pagar",
     ],
-    "Rimac Preliquidacion": [
-        "total_general",
+    "Pacifico Preliquidacion": [
+        "saldo_anterior",
+        "monto_imponible",
         "igv",
+        "neto_a_pagar",
+    ],
+    "Rimac Preliquidacion": [
         "total_comision",
+        "igv",
+        "total_general",
     ],
     "Cesce Liquidacion": [
         "valor_venta",
         "igv",
         "valor_total",
+    ],
+    "Qualitas Liquidacion": [
+        "saldo_actual_neto_resumen",
+        "igv_resumen",
+        "comision_total_periodo_resumen",
+        "saldo_anterior",
+        "comision_total_periodo",
+        "otros_cargos",
+        "otros_abonos",
+        "pago_comisiones_periodo_anterior",
+        "pago_detracciones_periodo_anterior",
+        "saldo_actual_neto",
+        "igv",
+        "saldo_actual_total",
+    ],
+    "Protecta Lote": [
+        "monto_neto",
+        "igv",
+        "monto_total",
+    ],
+}
+
+PROFILE_TOTAL_COLUMN_ORDER = {
+    "Protecta Lote": [
+        "scope",
+        "label",
+        "metric",
+        "value",
+        "month",
+        "prima",
+        "comision",
+        "igv",
+        "total",
+        "raw_line",
     ],
 }
 
@@ -327,6 +387,8 @@ def _prepare_detail_frame(frame: pd.DataFrame) -> pd.DataFrame:
         ordered = _reorder_detail_block(ordered, CESCE_DETAIL_ORDER)
     if _has_columns(ordered, AVLA_DETAIL_ORDER):
         ordered = _reorder_detail_block(ordered, AVLA_DETAIL_ORDER)
+    if _has_columns(ordered, PACIFICO_SEG_DETAIL_ORDER):
+        ordered = _reorder_detail_block(ordered, PACIFICO_SEG_DETAIL_ORDER)
     if _has_columns(ordered, RIMAC_DETAIL_ORDER):
         ordered = _reorder_detail_block(ordered, RIMAC_DETAIL_ORDER)
 
@@ -378,6 +440,12 @@ def _prepare_total_frame(frame: pd.DataFrame) -> pd.DataFrame:
             .reset_index(drop=True)
         )
 
+    profile_names = [str(value) for value in ordered.get("detected_profile", pd.Series(dtype=object)).dropna().unique()]
+    if len(profile_names) == 1:
+        desired_columns = PROFILE_TOTAL_COLUMN_ORDER.get(profile_names[0])
+        if desired_columns:
+            ordered = _reorder_columns_to_front(ordered, desired_columns)
+
     return ordered
 
 
@@ -399,6 +467,14 @@ def _reorder_detail_block(frame: pd.DataFrame, desired_block: list[str]) -> pd.D
 
     suffix_columns = [column for column in frame.columns if column not in set(prefix_columns) | seen_block]
     return frame.loc[:, [*prefix_columns, *existing_block, *suffix_columns]]
+
+
+def _reorder_columns_to_front(frame: pd.DataFrame, desired_order: list[str]) -> pd.DataFrame:
+    existing_columns = [column for column in desired_order if column in frame.columns]
+    if not existing_columns:
+        return frame
+    remaining_columns = [column for column in frame.columns if column not in set(existing_columns)]
+    return frame.loc[:, [*existing_columns, *remaining_columns]]
 
 
 def _metric_rank_for_row(*, metric, profile, global_metric_rank: dict[str, int], profile_metric_rank: dict[str, dict[str, int]]) -> int:

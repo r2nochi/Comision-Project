@@ -125,7 +125,7 @@ class ProtectaLoteProfile(BaseProfile):
                         "poliza": self._normalize_policy(
                             self._ocr_cell(image, column_edges[1], top, column_edges[2], bottom)
                         ),
-                        "contratante": self._normalize_cell_text(
+                        "contratante": self._normalize_contratante(
                             self._ocr_cell(image, column_edges[2], top, column_edges[3], bottom)
                         ),
                         "fecha_emision": self._normalize_cell_text(date_text),
@@ -218,6 +218,11 @@ class ProtectaLoteProfile(BaseProfile):
         normalized = normalize_spaces(value.replace("\n", " ").replace("§", "S").replace("$", "S"))
         normalized = normalized.replace("FO14", "F014").replace("FC14", "FC14").replace("FOT4", "F014")
         normalized = normalized.replace("E.!.R.L.", "E.I.R.L.").replace("S$.A.C.", "S.A.C.")
+        return normalized
+
+    def _normalize_contratante(self, value: str) -> str:
+        normalized = self._normalize_cell_text(value)
+        normalized = re.sub(r"\bA\s+8\s+CL\b", "A & CL", normalized, flags=re.IGNORECASE)
         return normalized
 
     def _normalize_policy(self, value: str) -> str:

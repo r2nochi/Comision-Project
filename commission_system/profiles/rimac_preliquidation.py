@@ -338,6 +338,8 @@ class RimacPreliquidationProfile(BaseProfile):
         normalized = re.sub(r"\b([A-Z])Y([A-Z])(?=[A-Z]{3,})", r"\1 Y \2 ", normalized)
         normalized = re.sub(r"(?<=[A-Z])(?=(SCRL|SAC|SRL|EIRL)\b)", " ", normalized)
         normalized = re.sub(r"(?<=[A-Z])(?=(S\.A\.C\.|S\.A\.|S\.R\.L\.)\b)", " ", normalized)
+        normalized = re.sub(r"\bOESIAPERU\b", "OESIA PERU", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\bSERVI[ÍI]?ME[ÉE]?DICOS\b", "SERVIMEDICOS", normalized, flags=re.IGNORECASE)
         return normalize_spaces(normalized)
 
     def _normalize_policy(self, value: str, producto: str) -> str:

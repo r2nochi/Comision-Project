@@ -129,7 +129,14 @@ class PositivaBoletaProfile(BaseProfile):
 
     def _normalize_detail_row(self, row: dict) -> dict:
         normalized = dict(row)
-        normalized["ramo"] = self._normalize_ramo(str(normalized.get("ramo", "")))
+        ramo, poliza, document = self._normalize_ramo_poliza_document(
+            ramo=str(normalized.get("ramo", "")),
+            poliza=str(normalized.get("poliza", "")),
+            document=str(normalized.get("document", "")),
+        )
+        normalized["ramo"] = ramo
+        normalized["poliza"] = poliza
+        normalized["document"] = document
         normalized["description"] = self._normalize_description(str(normalized.get("description", "")))
         return normalized
 
@@ -152,11 +159,51 @@ class PositivaBoletaProfile(BaseProfile):
                 return ramo
         return normalized
 
+    def _normalize_ramo_poliza_document(self, *, ramo: str, poliza: str, document: str) -> tuple[str, str, str]:
+        normalized_ramo = normalize_spaces(ramo)
+        normalized_poliza = normalize_spaces(poliza)
+        normalized_document = normalize_spaces(document).replace(" ", "")
+
+        known_ramos = [
+            "VIDA LEY D.L. 688",
+            "ACCIDENTES PERSONALES",
+            "VEHICULOS",
+            "INCENDIO",
+            "SCTR",
+            "SOAT",
+        ]
+
+        ramo_tokens = normalized_ramo.split()
+        for known_ramo in known_ramos:
+            known_tokens = known_ramo.split()
+            if ramo_tokens[: len(known_tokens)] != known_tokens:
+                continue
+
+            trailing_tokens = ramo_tokens[len(known_tokens) :]
+            trailing_value = " ".join(trailing_tokens)
+            if (
+                trailing_value
+                and re.fullmatch(r"[A-Z0-9/-]+", trailing_value)
+                and re.fullmatch(r"[A-Z]{1,4}", normalized_poliza)
+                and re.fullmatch(r"\d{6,}", normalized_document)
+            ):
+                return known_ramo, trailing_value, f"{normalized_poliza}{normalized_document}"
+
+            return known_ramo, normalized_poliza, normalized_document
+
+        return self._normalize_ramo(normalized_ramo), normalized_poliza, normalized_document
+
     def _normalize_description(self, value: str) -> str:
         normalized = normalize_spaces(value)
         normalized = re.sub(r"^[—–-]+\s*", "", normalized)
         normalized = re.sub(r"\bRC\s+8\s+HA\b", "RC & HA", normalized, flags=re.IGNORECASE)
         normalized = re.sub(r"\bJ\.M\.F\.\s+8\s+S\b", "J.M.F. & S", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(
+            r"\bBUSINESS\s+MANAGEMENT\s+[£Ł]\s+SERVICES\b",
+            "BUSINESS MANAGEMENT & SERVICES",
+            normalized,
+            flags=re.IGNORECASE,
+        )
         normalized = re.sub(
             r"\bC\s*E\s*P\s+REVERENDO\s+HNO\s+GASTON\s+MARIA\s+S\.?\b",
             "C E P REVERENDO HNO GASTON MARIA S",
